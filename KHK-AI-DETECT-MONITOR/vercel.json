@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "name": "khk-ai-detect-monitor",
+  "name": "khk-monitor",
   "builds": [
     {
       "src": "app.py",

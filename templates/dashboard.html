@@ -1,0 +1,372 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工場監視システム - YOLO11 ダッシュボード</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .video-panel {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .control-panel {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .stat-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        #video-stream {
+            width: 100%;
+            max-width: 800px;
+            border-radius: 5px;
+        }
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        .btn:hover {
+            background: #5a6fd8;
+        }
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-online {
+            background-color: #4CAF50;
+        }
+        .status-offline {
+            background-color: #f44336;
+        }
+        .alert {
+            background-color: #ff6b6b;
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .count-display {
+            font-size: 2em;
+            font-weight: bold;
+            color: #333;
+            text-align: center;
+            margin: 10px 0;
+        }
+        .input-group {
+            margin: 10px 0;
+        }
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🏭 工場監視システム - YOLO11 ダッシュボード</h1>
+        <p>リアルタイム物体検出・在庫管理システム</p>
+    </div>
+
+    <div class="dashboard-grid">
+        <div class="video-panel">
+            <h2>📹 ライブ映像</h2>
+            <img id="video-stream" src="" alt="ビデオストリーム" style="display: none;">
+            <div id="no-stream" style="text-align: center; color: #666; padding: 50px;">
+                ストリーミングが開始されていません
+            </div>
+        </div>
+
+        <div class="control-panel">
+            <h2>🎛️ 制御パネル</h2>
+            
+            <div class="input-group">
+                <label for="camera-source">カメラソース:</label>
+                <input type="text" id="camera-source" placeholder="0 (Webカメラ) または RTSP URL">
+            </div>
+            
+            <button class="btn" onclick="connectCamera()">📷 カメラ接続</button>
+            <button class="btn" onclick="startStreaming()" id="start-btn" disabled>▶️ 開始</button>
+            <button class="btn" onclick="stopStreaming()" id="stop-btn" disabled>⏹️ 停止</button>
+            
+            <hr style="margin: 20px 0;">
+            
+            <h3>📊 システム状態</h3>
+            <div id="system-status">
+                <p><span class="status-indicator status-offline"></span>カメラ: 未接続</p>
+                <p><span class="status-indicator status-offline"></span>ストリーミング: 停止中</p>
+                <p>接続クライアント: <span id="client-count">0</span>人</p>
+            </div>
+            
+            <hr style="margin: 20px 0;">
+            
+            <h3>📁 データ管理</h3>
+            <button class="btn" onclick="exportData()">💾 データエクスポート</button>
+            <button class="btn" onclick="refreshStats()">🔄 統計更新</button>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>📦 現在の在庫</h3>
+            <div id="current-inventory">
+                <div class="count-display" id="total-count">0</div>
+                <p>総アイテム数</p>
+                <div id="item-counts"></div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <h3>🚨 アラート</h3>
+            <div id="alerts-container">
+                <p style="color: #666;">アラートはありません</p>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <h3>📈 統計情報</h3>
+            <div id="statistics">
+                <p>検出レート: <span id="detection-rate">0</span>/時間</p>
+                <p>セッション開始: <span id="session-start">-</span></p>
+                <p>総検出数: <span id="total-detections">0</span></p>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <h3>📊 トレンドグラフ</h3>
+            <div id="trend-chart" style="height: 300px;"></div>
+        </div>
+    </div>
+
+    <script>
+        // Socket.IO接続
+        const socket = io();
+        
+        let isStreaming = false;
+        let isConnected = false;
+
+        // Socket.IOイベントハンドラ
+        socket.on('connect', function() {
+            console.log('サーバーに接続しました');
+            updateConnectionStatus(true);
+        });
+
+        socket.on('disconnect', function() {
+            console.log('サーバーから切断されました');
+            updateConnectionStatus(false);
+        });
+
+        socket.on('frame_update', function(data) {
+            updateVideoStream(data);
+            updateInventoryDisplay(data);
+        });
+
+        socket.on('status_update', function(data) {
+            updateSystemStatus(data);
+        });
+
+        // カメラ接続
+        function connectCamera() {
+            const source = document.getElementById('camera-source').value;
+            if (!source) {
+                alert('カメラソースを入力してください');
+                return;
+            }
+
+            fetch('/api/connect_camera', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({source: source === '0' ? 0 : source})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    isConnected = true;
+                    document.getElementById('start-btn').disabled = false;
+                    alert('カメラ接続成功');
+                } else {
+                    alert('カメラ接続失敗: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('接続エラー');
+            });
+        }
+
+        // ストリーミング開始
+        function startStreaming() {
+            fetch('/api/start_streaming', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    isStreaming = true;
+                    document.getElementById('start-btn').disabled = true;
+                    document.getElementById('stop-btn').disabled = false;
+                } else {
+                    alert('ストリーミング開始失敗: ' + data.message);
+                }
+            });
+        }
+
+        // ストリーミング停止
+        function stopStreaming() {
+            fetch('/api/stop_streaming', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    isStreaming = false;
+                    document.getElementById('start-btn').disabled = false;
+                    document.getElementById('stop-btn').disabled = true;
+                    document.getElementById('video-stream').style.display = 'none';
+                    document.getElementById('no-stream').style.display = 'block';
+                }
+            });
+        }
+
+        // ビデオストリーム更新
+        function updateVideoStream(data) {
+            const videoElement = document.getElementById('video-stream');
+            const noStreamElement = document.getElementById('no-stream');
+            
+            if (data.image) {
+                videoElement.src = data.image;
+                videoElement.style.display = 'block';
+                noStreamElement.style.display = 'none';
+            }
+        }
+
+        // 在庫表示更新
+        function updateInventoryDisplay(data) {
+            if (data.inventory_summary) {
+                const summary = data.inventory_summary;
+                
+                // 総数表示
+                document.getElementById('total-count').textContent = summary.total_items || 0;
+                
+                // アイテム別カウント
+                const itemCountsDiv = document.getElementById('item-counts');
+                itemCountsDiv.innerHTML = '';
+                
+                for (const [item, count] of Object.entries(summary.current_counts || {})) {
+                    const itemDiv = document.createElement('div');
+                    itemDiv.innerHTML = `<strong>${item}:</strong> ${count}個`;
+                    itemCountsDiv.appendChild(itemDiv);
+                }
+                
+                // アラート表示
+                const alertsDiv = document.getElementById('alerts-container');
+                alertsDiv.innerHTML = '';
+                
+                if (summary.alerts && summary.alerts.length > 0) {
+                    summary.alerts.forEach(alert => {
+                        const alertDiv = document.createElement('div');
+                        alertDiv.className = 'alert';
+                        alertDiv.textContent = `${alert.class_name}: ${alert.current_count}/${alert.threshold}`;
+                        alertsDiv.appendChild(alertDiv);
+                    });
+                } else {
+                    alertsDiv.innerHTML = '<p style="color: #666;">アラートはありません</p>';
+                }
+            }
+        }
+
+        // システム状態更新
+        function updateSystemStatus(data) {
+            // 実装予定
+        }
+
+        // 接続状態更新
+        function updateConnectionStatus(connected) {
+            // 実装予定
+        }
+
+        // データエクスポート
+        function exportData() {
+            fetch('/api/export_data', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('データエクスポート完了: ' + data.filename);
+                } else {
+                    alert('エクスポート失敗: ' + data.message);
+                }
+            });
+        }
+
+        // 統計更新
+        function refreshStats() {
+            fetch('/api/statistics')
+            .then(response => response.json())
+            .then(data => {
+                // 統計表示更新
+                console.log('統計データ:', data);
+            });
+        }
+
+        // 定期更新
+        setInterval(() => {
+            if (isStreaming) {
+                socket.emit('request_frame');
+            }
+            socket.emit('request_status');
+        }, 2000);
+    </script>
+</body>
+</html>
+        

@@ -1,0 +1,416 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏖️ 海岸人数監視システム - YOLO11</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+        .video-panel {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .control-panel {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+        .stat-card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        #beach-stream {
+            width: 100%;
+            max-width: 800px;
+            border-radius: 10px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        .btn {
+            background: linear-gradient(45deg, #FF6B6B, #4ECDC4);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            margin: 10px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        .btn:disabled {
+            background: rgba(255,255,255,0.3);
+            cursor: not-allowed;
+            transform: none;
+        }
+        .count-display {
+            font-size: 3em;
+            font-weight: bold;
+            text-align: center;
+            margin: 20px 0;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            background: linear-gradient(45deg, #FF6B6B, #4ECDC4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .beach-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .beach-info-item {
+            text-align: center;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        .beach-info-item h3 {
+            margin: 0 0 10px 0;
+            font-size: 1.2em;
+        }
+        .beach-info-item .value {
+            font-size: 2em;
+            font-weight: bold;
+        }
+        #hourly-chart {
+            height: 300px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-online {
+            background-color: #4CAF50;
+            box-shadow: 0 0 10px #4CAF50;
+        }
+        .status-offline {
+            background-color: #f44336;
+        }
+        .youtube-link {
+            color: #FF6B6B;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .youtube-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🏖️ 海岸人数監視システム</h1>
+        <p>YOLO11 + YouTubeライブストリームによるリアルタイム人数カウント</p>
+        <a href="https://www.youtube.com/live/_Upz1dlQgpg?si=vPvgjPtX32p6zXo2" 
+           target="_blank" class="youtube-link">📺 YouTube Live Stream</a>
+    </div>
+
+    <div class="dashboard-grid">
+        <div class="video-panel">
+            <h2>🎥 ライブ映像</h2>
+            <img id="beach-stream" src="" alt="海岸ライブストリーム" style="display: none;">
+            <div id="no-stream" style="text-align: center; color: rgba(255,255,255,0.7); padding: 100px;">
+                <h3>📡 ストリーミング待機中</h3>
+                <p>監視を開始してください</p>
+            </div>
+        </div>
+
+        <div class="control-panel">
+            <h2>🎛️ 制御パネル</h2>
+            
+            <button class="btn" onclick="startBeachMonitoring()" id="start-btn">▶️ 監視開始</button>
+            <button class="btn" onclick="stopBeachMonitoring()" id="stop-btn" disabled>⏹️ 監視停止</button>
+            
+            <hr style="margin: 30px 0; border: 1px solid rgba(255,255,255,0.2);">
+            
+            <h3>📊 システム状態</h3>
+            <div id="system-status">
+                <p><span class="status-indicator status-offline"></span>ストリーミング: 停止中</p>
+                <p>接続クライアント: <span id="client-count">0</span>人</p>
+            </div>
+            
+            <hr style="margin: 30px 0; border: 1px solid rgba(255,255,255,0.2);">
+            
+            <h3>💾 データ管理</h3>
+            <button class="btn" onclick="exportBeachData()">📊 データエクスポート</button>
+            <button class="btn" onclick="refreshBeachStats()">🔄 統計更新</button>
+        </div>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <h3>👥 現在の人数</h3>
+            <div class="count-display" id="current-count">0</div>
+            <div class="beach-info">
+                <div class="beach-info-item">
+                    <h3>今日の最大</h3>
+                    <div class="value" id="max-count">0</div>
+                </div>
+                <div class="beach-info-item">
+                    <h3>総検出数</h3>
+                    <div class="value" id="total-detections">0</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <h3>📈 時間別統計</h3>
+            <div id="hourly-chart"></div>
+        </div>
+
+        <div class="stat-card">
+            <h3>📊 監視情報</h3>
+            <div id="monitoring-info">
+                <p>📺 ソース: YouTube Live Stream</p>
+                <p>🤖 AI: YOLO11 (Ultralytics)</p>
+                <p>🎯 検出対象: 人 (Person)</p>
+                <p>⏱️ 更新間隔: 5秒</p>
+                <p id="last-update">最終更新: -</p>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <h3>🏖️ 海岸ゾーン</h3>
+            <div id="zone-info">
+                <div class="beach-info-item">
+                    <h3>海岸エリア全体</h3>
+                    <div class="value" id="beach-zone-count">0</div>
+                </div>
+                <div class="beach-info-item">
+                    <h3>砂浜中央部</h3>
+                    <div class="value" id="central-zone-count">0</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Socket.IO接続
+        const socket = io();
+        
+        let isStreaming = false;
+
+        // Socket.IOイベントハンドラ
+        socket.on('connect', function() {
+            console.log('海岸監視サーバーに接続しました');
+            updateConnectionStatus(true);
+        });
+
+        socket.on('disconnect', function() {
+            console.log('サーバーから切断されました');
+            updateConnectionStatus(false);
+        });
+
+        socket.on('beach_frame_update', function(data) {
+            updateBeachStream(data);
+            updateBeachStats(data);
+        });
+
+        socket.on('beach_stats_update', function(data) {
+            updateBeachStatistics(data);
+        });
+
+        // 監視開始
+        function startBeachMonitoring() {
+            fetch('/api/start_beach_monitoring', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    isStreaming = true;
+                    document.getElementById('start-btn').disabled = true;
+                    document.getElementById('stop-btn').disabled = false;
+                    updateSystemStatus(true);
+                } else {
+                    alert('監視開始失敗: ' + data.message);
+                }
+            });
+        }
+
+        // 監視停止
+        function stopBeachMonitoring() {
+            fetch('/api/stop_beach_monitoring', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    isStreaming = false;
+                    document.getElementById('start-btn').disabled = false;
+                    document.getElementById('stop-btn').disabled = true;
+                    document.getElementById('beach-stream').style.display = 'none';
+                    document.getElementById('no-stream').style.display = 'block';
+                    updateSystemStatus(false);
+                }
+            });
+        }
+
+        // 海岸ストリーム更新
+        function updateBeachStream(data) {
+            const videoElement = document.getElementById('beach-stream');
+            const noStreamElement = document.getElementById('no-stream');
+            
+            if (data.image) {
+                videoElement.src = data.image;
+                videoElement.style.display = 'block';
+                noStreamElement.style.display = 'none';
+            }
+        }
+
+        // 海岸統計更新
+        function updateBeachStats(data) {
+            document.getElementById('current-count').textContent = data.person_count || 0;
+            document.getElementById('max-count').textContent = data.max_count || 0;
+            document.getElementById('total-detections').textContent = data.total_detections || 0;
+            
+            const now = new Date().toLocaleTimeString('ja-JP');
+            document.getElementById('last-update').textContent = `最終更新: ${now}`;
+        }
+
+        // システム状態更新
+        function updateSystemStatus(streaming) {
+            const indicator = document.querySelector('.status-indicator');
+            const statusText = indicator.nextSibling;
+            
+            if (streaming) {
+                indicator.className = 'status-indicator status-online';
+                statusText.textContent = 'ストリーミング: 監視中';
+            } else {
+                indicator.className = 'status-indicator status-offline';
+                statusText.textContent = 'ストリーミング: 停止中';
+            }
+        }
+
+        // 接続状態更新
+        function updateConnectionStatus(connected) {
+            // 実装予定
+        }
+
+        // 海岸統計更新
+        function updateBeachStatistics(data) {
+            if (data.hourly_stats) {
+                createHourlyChart(data.hourly_stats);
+            }
+        }
+
+        // 時間別チャート作成
+        function createHourlyChart(hourlyStats) {
+            const hours = Object.keys(hourlyStats).sort();
+            const averages = hours.map(hour => hourlyStats[hour].average);
+            const maxes = hours.map(hour => hourlyStats[hour].max);
+
+            const trace1 = {
+                x: hours,
+                y: averages,
+                type: 'scatter',
+                mode: 'lines+markers',
+                name: '平均人数',
+                line: {color: '#4ECDC4'}
+            };
+
+            const trace2 = {
+                x: hours,
+                y: maxes,
+                type: 'scatter',
+                mode: 'lines+markers',
+                name: '最大人数',
+                line: {color: '#FF6B6B'}
+            };
+
+            const layout = {
+                title: '時間別人数推移',
+                xaxis: {title: '時間'},
+                yaxis: {title: '人数'},
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: {color: 'white'}
+            };
+
+            Plotly.newPlot('hourly-chart', [trace1, trace2], layout);
+        }
+
+        // データエクスポート
+        function exportBeachData() {
+            fetch('/api/export_beach_data', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('データエクスポート完了: ' + data.filename);
+                } else {
+                    alert('エクスポート失敗: ' + data.message);
+                }
+            });
+        }
+
+        // 統計更新
+        function refreshBeachStats() {
+            socket.emit('request_beach_stats');
+        }
+
+        // 定期更新
+        setInterval(() => {
+            if (isStreaming) {
+                socket.emit('request_beach_frame');
+            }
+            socket.emit('request_beach_stats');
+        }, 5000);
+
+        // 初期統計読み込み
+        fetch('/api/beach_stats')
+        .then(response => response.json())
+        .then(data => {
+            updateBeachStatistics(data);
+        });
+    </script>
+</body>
+</html>
+        

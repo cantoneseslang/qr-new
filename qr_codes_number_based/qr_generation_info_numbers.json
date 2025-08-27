@@ -1,0 +1,34 @@
+{
+  "generation_time": "2025-07-26 14:47:34",
+  "total_count": 4,
+  "qr_codes": {
+    "1": {
+      "filename": "KIRII_NUMBER_1_BD-060_QR.png",
+      "product_code": "BD-060",
+      "product_name": "泰山普通石膏板 4'x6'x12mmx 4.5mm",
+      "qr_data": "1",
+      "file_size": 17690
+    },
+    "2": {
+      "filename": "KIRII_NUMBER_2_US0503206MM2440_QR.png",
+      "product_code": "US0503206MM2440",
+      "product_name": "Stud 50mmx32mmx0.6mmx2440mm",
+      "qr_data": "2",
+      "file_size": 21979
+    },
+    "3": {
+      "filename": "KIRII_NUMBER_3_AC-258_QR.png",
+      "product_code": "AC-258",
+      "product_name": "KIRII Corner Bead 2440mm (25pcs/bdl)(0.4mm 鋁)",
+      "qr_data": "3",
+      "file_size": 28929
+    },
+    "4": {
+      "filename": "KIRII_NUMBER_4_AC-261_QR.png",
+      "product_code": "AC-261",
+      "product_name": "黃岩綿- 60g (6pcs/pack)",
+      "qr_data": "4",
+      "file_size": 21472
+    }
+  }
+}

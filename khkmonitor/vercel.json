@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "name": "KHK-AI-DETECT-MONITOR",
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py"
+    }
+  ],
+  "env": {
+    "FLASK_ENV": "production"
+  },
+  "functions": {
+    "app.py": {
+      "maxDuration": 30
+    }
+  }
+}
+

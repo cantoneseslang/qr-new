@@ -1,0 +1,17 @@
+{
+  "name": "factory-monitoring-proxy",
+  "version": "1.0.0",
+  "description": "Factory Monitoring System Proxy for Vercel",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js",
+    "dev": "node proxy.js"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["proxy", "monitoring", "vercel"],
+  "author": "KIRII",
+  "license": "MIT"
+}

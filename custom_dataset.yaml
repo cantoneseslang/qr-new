@@ -1,0 +1,26 @@
+
+# カスタムデータセット設定
+path: ./dataset  # データセットのルートパス
+train: images/train  # 学習画像パス
+val: images/val      # 検証画像パス
+
+# クラス定義（既存80クラス + カスタムクラス）
+names:
+  # 既存のYOLO11クラス (0-79)
+  0: person
+  1: bicycle
+  2: car
+  5: bus
+  6: train
+  7: truck
+  
+  # カスタムクラス (80以降)
+  80: factory_robot      # 工場ロボット
+  81: conveyor_belt      # コンベアベルト
+  82: safety_helmet      # 安全ヘルメット
+  83: forklift          # フォークリフト
+  84: warning_sign      # 警告標識
+  85: fire_extinguisher # 消火器
+  86: emergency_exit    # 非常口
+  87: machinery_part    # 機械部品
+  88: qr_code           # QRコード

@@ -1,0 +1,13 @@
+# フォークリフト専用データセット設定
+path: ./dataset  # データセットのルートパス
+train: images/train  # 学習画像パス
+val: images/val      # 検証画像パス
+
+# フォークリフト専用クラス定義
+names:
+  0: forklift        # フォークリフト（メインクラス）
+  1: person          # 人（フォークリフト運転手など）
+  2: pallet          # パレット
+  3: box             # 箱・荷物
+  4: warning_sign    # 警告標識
+  5: safety_cone     # 安全コーン 

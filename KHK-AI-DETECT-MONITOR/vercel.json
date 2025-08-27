@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "name": "KHK-AI-DETECT-MONITOR",
+  "name": "khk-ai-detect-monitor",
   "builds": [
     {
       "src": "app.py",
@@ -15,11 +15,5 @@
   ],
   "env": {
     "FLASK_ENV": "production"
-  },
-  "functions": {
-    "app.py": {
-      "maxDuration": 30
-    }
   }
 }
-

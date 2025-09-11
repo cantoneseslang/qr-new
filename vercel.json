@@ -3,14 +3,14 @@
   "name": "khk-ai-detect-monitor",
   "builds": [
     {
-      "src": "app.py",
+      "src": "cctv_streaming_fixed.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "app.py"
+      "dest": "cctv_streaming_fixed.py"
     }
   ],
   "env": {

@@ -48,3 +48,5 @@ data/images/
 *.tmp
 *.temp 
 .vercel
+
+.vercel

@@ -153,6 +153,13 @@ def index():
                 <div>監視システムを開く</div>
                 <div style="font-size: 0.8em; opacity: 0.8;">CCTV監視・YOLO物体検出</div>
             </a>
+            
+            <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 10px; font-size: 0.9em;">
+                <div style="color: #ffd700; margin-bottom: 10px;">⚠️ 重要なお知らせ</div>
+                <div>• このページは監視システムへの入り口です</div>
+                <div>• 実際の監視機能はローカル環境（localhost:5013）で動作します</div>
+                <div>• Vercel環境ではフレーム取得やストリーミングは無効化されています</div>
+            </div>
         </div>
         
         <div class="info-section">
@@ -175,6 +182,57 @@ def index():
             Powered by Vercel
         </div>
     </div>
+    
+    <script>
+        // 404エラー防止のためのエラーハンドリング
+        console.log('📹 Vercel環境: フレーム取得はローカル環境でご利用ください');
+        
+        // フレーム取得の試行を完全に無効化
+        if (typeof updateImage === 'function') {
+            // updateImage関数が存在する場合は無効化
+            window.updateImage = function() {
+                console.log('📹 Vercel環境: フレーム取得は無効化されています');
+                return false;
+            };
+        }
+        
+        // ストリーム開始の試行を無効化
+        if (typeof startStream === 'function') {
+            window.startStream = function() {
+                console.log('📹 Vercel環境: ストリーミングは無効化されています');
+                return false;
+            };
+        }
+        
+        // 画像更新の試行を無効化
+        if (typeof startImageUpdate === 'function') {
+            window.startImageUpdate = function() {
+                console.log('📹 Vercel環境: 画像更新は無効化されています');
+                return false;
+            };
+        }
+        
+        // エラーイベントの処理
+        window.addEventListener('error', function(e) {
+            if (e.target.src && e.target.src.includes('/vercel/frame')) {
+                console.log('📹 Vercel環境: フレーム取得はローカル環境でご利用ください');
+                e.target.style.display = 'none';
+            }
+        });
+        
+        // 画像読み込みエラーの処理
+        document.addEventListener('DOMContentLoaded', function() {
+            const images = document.querySelectorAll('img');
+            images.forEach(img => {
+                img.addEventListener('error', function() {
+                    if (this.src.includes('/vercel/frame')) {
+                        console.log('📹 Vercel環境: フレーム取得はローカル環境でご利用ください');
+                        this.style.display = 'none';
+                    }
+                });
+            });
+        });
+    </script>
 </body>
 </html>
     ''', current_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -187,6 +245,24 @@ def status():
         'service': 'KHK-AI-DETECT-MONITOR',
         'timestamp': datetime.now().isoformat(),
         'monitoring_url': 'http://localhost:5013'
+    })
+
+@app.route('/vercel/frame')
+def vercel_frame():
+    """Vercel用フレーム取得エンドポイント（404エラー防止）"""
+    return jsonify({
+        'success': False,
+        'error': 'Vercel環境ではフレーム取得はサポートされていません。ローカル環境でご利用ください。',
+        'local_url': 'http://localhost:5013'
+    })
+
+@app.route('/vercel/stream')
+def vercel_stream():
+    """Vercel用ストリームエンドポイント（404エラー防止）"""
+    return jsonify({
+        'success': False,
+        'error': 'Vercel環境ではストリーミングはサポートされていません。ローカル環境でご利用ください。',
+        'local_url': 'http://localhost:5013'
     })
 
 @app.route('/health')

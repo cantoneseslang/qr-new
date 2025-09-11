@@ -11,20 +11,21 @@ QRコード番号（1-4）でスキャンする在庫管理システムを、Goo
 - **シートID**: `1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M`
 - **シートURL**: https://docs.google.com/spreadsheets/d/1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M/edit?gid=0#gid=0
 
-### 2. データマッピング構造
-Googleシートの列構成に対応：
+### 2. データマッピング構造（Stockシート・確定版）
+以下の列マッピングに合わせて取得・表示します。
 
-| 列 | データ | 説明 |
-|---|--------|------|
-| A | 番号 | QRコード番号 (1,2,3,4) |
-| B | QRコード | QRコード情報 |
-| C | 製品コード | BD-060, US0503206MM2440等 |
-| D | 製品名 | 商品の詳細名称 |
-| E | 在庫数量 | 数値 |
-| F | 数量の単位 | 張、只、個、包 |
-| G | 最終更新 | 更新日付 |
-| H | 製品カテゴリ | Merchandies, Products, MK |
-| I | 保管場所 | A-1, A-2, B-1, C-1 |
+- A: 番号（QRコード番号 1,2,3,4）
+- B: QRコード（QRコード情報）
+- C: 製品コード（例: BD-060, US0503206MM2440 など）
+- G: 製品名（商品詳細名称）
+- E: 在庫場所（location）
+- I: 在庫数量（OnHand）
+- J: 在庫数量（SC w/o DN）
+- K: 在庫数量（Available）
+- L: 数量の単位（張 / 只 / 個 / 包）
+- M: 最終更新（更新日付）
+- E: 製品カテゴリ（Merchandies / Products / MK）
+- N: Unit Cost (Base Currency)
 
 ### 3. システム機能
 

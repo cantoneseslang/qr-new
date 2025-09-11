@@ -18,6 +18,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 import random
 from datetime import datetime
+import re
+import json
+from typing import List, Dict, Any
+
+# Google Sheets 書込用（サービスアカウント）
+try:
+    from google.oauth2.service_account import Credentials as _GA_Credentials
+    from googleapiclient.discovery import build as _ga_build
+    _GOOGLE_CLIENT_AVAILABLE = True
+except Exception:
+    _GOOGLE_CLIENT_AVAILABLE = False
 
 # SSL警告を無効化
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -30,8 +41,577 @@ if os.environ.get('ENABLE_DEBUG_LOG', '0') != '1':
     _builtins.print = _noop_print
 
 app = Flask(__name__)
+# リクエスト上限（大容量リクエストでのMemoryError対策）
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5MB
 # HTTPアクセスログを抑制（200のアクセスログを出さない）
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+# --- PQ-Form API (Flask, Google Sheets via Service Account) ---
+
+@app.route('/api/pq_form/submit', methods=['POST', 'OPTIONS'])
+def api_pq_form_submit():
+    # CORS (ローカル確認のため寛容に許可)
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        return resp
+
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        rows = payload.get('rows') or []
+        if not isinstance(rows, list) or not rows:
+            return jsonify(success=False, error='rows is empty'), 400
+
+        manager = PQFormSheetsManager()
+        # 行の開始位置を8行目にし、次の空行へ順次書込
+        result = manager.append_rows_from_row(rows, start_row=8)
+        resp = jsonify(success=True, result=result)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return resp
+    except Exception as e:
+        resp = jsonify(success=False, error=str(e))
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return resp, 500
+
+
+@app.route('/api/pq_form/fetch', methods=['GET', 'OPTIONS'])
+def api_pq_form_fetch():
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        return resp
+
+    try:
+        date_str = request.args.get('date') or datetime.now().strftime('%Y/%m/%d')
+        manager = PQFormSheetsManager()
+        rows = manager.fetch_by_date(date_str)
+        resp = jsonify(success=True, date=date_str, rows=rows)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return resp
+    except Exception as e:
+        resp = jsonify(success=False, error=str(e))
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        return resp, 500
+
+@app.route('/api/pq_form/update_header', methods=['POST', 'OPTIONS'])
+def api_pq_form_update_header():
+    """pq-form シートのヘッダー（產品種類/生産機械名/年月日）を書き込み。
+    シート座標マッピング（既定）:
+      - 產品種類: B2/D2/F2/H2/J2/L2/N2/P2 （P2:其他, R2:其他入力）
+      - 生産機械名: B3/D3/F3/H3/J3
+      - 日期: B4=年, D4=月, F4=日
+    必要に応じて将来 payload.range_map で上書き可能。
+    """
+    if request.method == 'OPTIONS':
+        resp = make_response('', 204)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        return resp
+
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        date_obj = (payload.get('date') or {})
+        types = (payload.get('types') or {})
+        machines = (payload.get('machines') or {})
+
+        manager = PQFormSheetsManager()
+        service = manager._ensure_service()
+
+        sheet = manager.sheet_name
+        # 既定マッピング（ユーザー指定座標）
+        vr_list = []
+        def tf(v):
+            return True if v is True else False
+        # 產品種類（チェックボックス）
+        vr_list.append({'range': f'{sheet}!B2', 'values': [[tf(types.get('企筒'))]]})
+        vr_list.append({'range': f'{sheet}!D2', 'values': [[tf(types.get('地槽'))]]})
+        vr_list.append({'range': f'{sheet}!F2', 'values': [[tf(types.get('鐵角'))]]})
+        vr_list.append({'range': f'{sheet}!H2', 'values': [[tf(types.get('批灰角'))]]})
+        vr_list.append({'range': f'{sheet}!J2', 'values': [[tf(types.get('W角'))]]})
+        vr_list.append({'range': f'{sheet}!L2', 'values': [[tf(types.get('闊槽'))]]})
+        vr_list.append({'range': f'{sheet}!N2', 'values': [[tf(types.get('C槽'))]]})
+        vr_list.append({'range': f'{sheet}!P2', 'values': [[tf(types.get('其他'))]]})
+        # 其他入力（テキスト）
+        vr_list.append({'range': f'{sheet}!R2', 'values': [[types.get('其他入力') or '']]})
+        # 生産機械名（チェックボックス）
+        vr_list.append({'range': f'{sheet}!B3', 'values': [[tf(machines.get('1號滾筒成形機'))]]})
+        vr_list.append({'range': f'{sheet}!D3', 'values': [[tf(machines.get('2號滾筒成形機'))]]})
+        vr_list.append({'range': f'{sheet}!F3', 'values': [[tf(machines.get('3號滾筒成形機'))]]})
+        vr_list.append({'range': f'{sheet}!H3', 'values': [[tf(machines.get('4號滾筒成形機'))]]})
+        vr_list.append({'range': f'{sheet}!J3', 'values': [[tf(machines.get('5號滾筒成形機'))]]})
+        # 日期（テキスト）
+        vr_list.append({'range': f'{sheet}!B4', 'values': [[date_obj.get('y') or '']]})
+        vr_list.append({'range': f'{sheet}!D4', 'values': [[date_obj.get('m') or '']]})
+        vr_list.append({'range': f'{sheet}!F4', 'values': [[date_obj.get('d') or '']]})
+
+        # 監査ログ（ENABLE_DEBUG_LOG=0でも出るようにwarningで出力）
+        try:
+            logging.warning(f"PQ-HEADER ranges: {[d['range'] for d in vr_list]}")
+        except Exception:
+            pass
+        body = {'valueInputOption': 'USER_ENTERED', 'data': vr_list}
+        result = service.spreadsheets().values().batchUpdate(
+            spreadsheetId=manager.sheet_id,
+            body=body
+        ).execute()
+        resp = jsonify(success=True, result=result)
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    except Exception as e:
+        resp = jsonify(success=False, error=str(e))
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp, 500
+
+class GoogleSheetsManager:
+    """Google Sheets連携管理クラス"""
+    
+    def __init__(self):
+        # Google Sheets API設定
+        self.api_key = "AIzaSyARbSHGDK-dCkmuP8ys7E2-G-treb3ZYIw"
+        self.sheet_id = "1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M"
+        self.sheet_url = f"https://docs.google.com/spreadsheets/d/{self.sheet_id}/edit"
+        
+    
+    def fetch_today_data(self):
+        """今日のデータを取得（Google Sheets API）"""
+        try:
+            # Google Sheets APIからデータを取得
+            today_data = self._fetch_from_google_sheets()
+            if today_data:
+                return today_data
+        except Exception as e:
+            print(f"⚠️ Google Sheets API接続エラー: {e}")
+        
+        # エラー時は空のデータを返す
+        print("❌ Google Sheetsからデータを取得できませんでした")
+        return {"production": [], "shipping": []}
+    
+    def _fetch_from_google_sheets(self):
+        """Google Sheets APIからデータを取得（delivery + produceシート）"""
+        try:
+            # まずシート一覧を取得してシート名を確認
+            sheets_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}?key={self.api_key}"
+            sheets_response = requests.get(sheets_url, timeout=10)
+            sheets_response.raise_for_status()
+            sheets_info = sheets_response.json()
+            
+            available_sheets = [sheet['properties']['title'] for sheet in sheets_info['sheets']]
+            print(f"📋 利用可能なシート: {available_sheets}")
+            
+            # Google Sheets API URL（余計なクエリは付けない）
+            # キャッシュはHTTP側で制御する
+            delivery_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/delivery?key={self.api_key}"
+            print(f"🔗 deliveryシートURL: {delivery_url}")
+            produce_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/produce?key={self.api_key}"
+            print(f"🔗 produceシートURL: {produce_url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            # deliveryシートから出荷データを取得
+            delivery_response = requests.get(delivery_url, headers=headers, timeout=10)
+            delivery_response.raise_for_status()
+            delivery_data = delivery_response.json()
+            
+            # produceシートから生産データを取得
+            produce_response = requests.get(produce_url, headers=headers, timeout=10)
+            produce_response.raise_for_status()
+            produce_data = produce_response.json()
+            
+            # 両方のデータを解析して統合
+            shipping_data = []
+            production_data = []
+            
+            if 'values' in delivery_data:
+                shipping_data = self._parse_delivery_data(delivery_data['values'])
+                print(f"✅ deliveryシートから {len(shipping_data)} 件の出荷データを取得")
+            else:
+                print("⚠️ deliveryシートにデータがありません")
+            
+            if 'values' in produce_data:
+                production_data = self._parse_produce_data(produce_data['values'])
+                print(f"✅ produceシートから {len(production_data)} 件の生産データを取得")
+            else:
+                print("⚠️ produceシートにデータがありません")
+            
+            result = {
+                "production": production_data or [],
+                "shipping": shipping_data or []
+            }
+            
+            print(f"📊 合計データ: 生産 {len(result['production'])} 件、出荷 {len(result['shipping'])} 件")
+            return result
+            
+        except Exception as e:
+            print(f"❌ Google Sheets API エラー: {e}")
+            import traceback
+            print(f"詳細エラー: {traceback.format_exc()}")
+            # エラー時は空のデータを返す
+            return {"production": [], "shipping": []}
+
+    # === 追加: ティッカー用パース関数（クラス内実装） ===
+    def _parse_delivery_data(self, rows):
+        """deliveryシートのデータを解析（本日分のみ）"""
+        if not rows or len(rows) < 2:
+            return []
+        data_rows = rows[1:]
+        today = datetime.now().strftime("%Y/%m/%d")
+        shipping_data = []
+        for row in data_rows:
+            if len(row) < 6:
+                continue
+            row_date = str(row[0] if len(row) > 0 else "").strip()
+            m = re.match(r"^(\d{4})\D(\d{1,2})\D(\d{1,2})$", row_date)
+            row_date_norm = f"{int(m.group(1)):04d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}" if m else row_date
+            if row_date_norm != today:
+                continue
+            # ステータス変換（ローカル関数で安全に処理）
+            def _to_jp(status: str) -> str:
+                s = (status or "").strip().lower()
+                if s == "done":
+                    return "出貨完"
+                elif s == "notyet":
+                    return "未出貨"
+                return "未出貨"
+
+            item = {
+                "code": row[1] if len(row) > 1 else "",
+                "name": row[3] if len(row) > 3 else "",
+                "quantity": row[4] if len(row) > 4 else "",
+                "status": _to_jp(row[5] if len(row) > 5 else ""),
+                "date": row_date
+            }
+            shipping_data.append(item)
+        return shipping_data
+
+    def _parse_produce_data(self, rows):
+        """produceシートのデータを解析（本日分のみ、MachineNumber対応）"""
+        if not rows or len(rows) < 2:
+            return []
+        data_rows = rows[1:]
+        today = datetime.now().strftime("%Y/%m/%d")
+        production_data = []
+        for row in data_rows:
+            if len(row) < 7:
+                continue
+            row_date = str(row[0] if len(row) > 0 else "").strip()
+            m = re.match(r"^(\d{4})\D(\d{1,2})\D(\d{1,2})$", row_date)
+            row_date_norm = f"{int(m.group(1)):04d}/{int(m.group(2)):02d}/{int(m.group(3)):02d}" if m else row_date
+            if row_date_norm != today:
+                continue
+            # ステータス変換（ローカル関数で安全に処理）
+            def _to_jp_prod(status: str) -> str:
+                s = (status or "").strip().lower()
+                if s == "done":
+                    return "生産完"
+                if s == "producing":
+                    return "生産中"
+                return "未生産"
+
+            item = {
+                "code": row[1] if len(row) > 1 else "",
+                "machine": row[2] if len(row) > 2 else "",
+                "name": row[4] if len(row) > 4 else "",
+                "quantity": row[5] if len(row) > 5 else "",
+                "status": _to_jp_prod(row[6] if len(row) > 6 else ""),
+                "date": row_date
+            }
+            production_data.append(item)
+        return production_data
+
+
+class PQFormSheetsManager:
+    """pq-form シート読取/書込マネージャ（サービスアカウント使用）"""
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+    def __init__(self, sheet_id_env: str = 'PQFORM_SHEET_ID', sheet_name: str = 'pq-form'):
+        self.sheet_id = os.environ.get(sheet_id_env) or ""
+        self.sheet_name = sheet_name
+        self._service = None
+
+    def _ensure_service(self):
+        if not _GOOGLE_CLIENT_AVAILABLE:
+            raise RuntimeError('google-api-python-client が未インストールです')
+        if self._service:
+            return self._service
+        # 認証情報: GOOGLE_SA_JSON（JSON文字列） or GOOGLE_SA_FILE（ファイルパス）
+        sa_json = os.environ.get('GOOGLE_SA_JSON')
+        sa_file = os.environ.get('GOOGLE_SA_FILE')
+        if sa_json:
+            import json as _json
+            info = _json.loads(sa_json)
+            creds = _GA_Credentials.from_service_account_info(info, scopes=self.SCOPES)
+        elif sa_file and os.path.exists(sa_file):
+            creds = _GA_Credentials.from_service_account_file(sa_file, scopes=self.SCOPES)
+        else:
+            raise RuntimeError('サービスアカウント認証情報が未設定（GOOGLE_SA_JSON もしくは GOOGLE_SA_FILE）')
+        self._service = _ga_build('sheets', 'v4', credentials=creds, cache_discovery=False)
+        return self._service
+
+    def append_rows(self, rows: List[List[Any]]):
+        if not self.sheet_id:
+            raise RuntimeError('環境変数 PQFORM_SHEET_ID が未設定です')
+        service = self._ensure_service()
+        body = {"values": rows}
+        rng = f"{self.sheet_name}!A:Z"
+        return service.spreadsheets().values().append(
+            spreadsheetId=self.sheet_id,
+            range=rng,
+            valueInputOption='USER_ENTERED',
+            insertDataOption='INSERT_ROWS',
+            body=body
+        ).execute()
+
+    def fetch_by_date(self, date_str: str) -> List[List[Any]]:
+        if not self.sheet_id:
+            raise RuntimeError('環境変数 PQFORM_SHEET_ID が未設定です')
+        service = self._ensure_service()
+        rng = f"{self.sheet_name}!A:Z"
+        res = service.spreadsheets().values().get(spreadsheetId=self.sheet_id, range=rng).execute()
+        values = res.get('values', [])
+        if not values:
+            return []
+        # 1行目ヘッダー想定、A列=日期
+        data = []
+        for row in values[1:]:
+            if len(row) > 0 and row[0] == date_str:
+                data.append(row)
+        return data
+
+    def append_rows_from_row(self, rows: List[List[Any]], start_row: int = 8, table_end_row: int = 16):
+        """開始行（デフォルト8行目）から、最初の空行を見つけて1行ずつ書き込む。
+        既存の空白行が途中にあればそこへ詰めて書込む（末尾appendではなく精確配置）。
+        """
+        if not self.sheet_id:
+            raise RuntimeError('環境変数 PQFORM_SHEET_ID が未設定です')
+        service = self._ensure_service()
+
+        def first_empty_row() -> int:
+            """行を1行ずつ直接確認して最初の未使用行を返す。
+            未使用判定: C列(產品編號)とG列(產品名稱)の両方が空。
+            A..K全て空でも未使用とみなす。
+            """
+            def non_empty(v: str) -> bool:
+                return str(v).strip() != ''
+            for r in range(start_row, table_end_row + 1):
+                try:
+                    # C列とG列だけ先に軽量チェック
+                    rng_cg = f"{self.sheet_name}!C{r}:G{r}"
+                    vals_cg = service.spreadsheets().values().get(
+                        spreadsheetId=self.sheet_id,
+                        range=rng_cg
+                    ).execute().get('values', [])
+                    c_val = ''
+                    g_val = ''
+                    if vals_cg and len(vals_cg) > 0:
+                        row = (vals_cg[0] + [''] * 5)[:5]  # C..G
+                        c_val = row[0]
+                        g_val = row[4]
+                    if not non_empty(c_val) and not non_empty(g_val):
+                        return r
+                    # 念のため A..K が全空かも確認（C/G以外で文字が入っていないか）
+                    rng_left = f"{self.sheet_name}!A{r}:K{r}"
+                    vals_left = service.spreadsheets().values().get(
+                        spreadsheetId=self.sheet_id,
+                        range=rng_left
+                    ).execute().get('values', [])
+                    if not vals_left:
+                        return r
+                    left_row = (vals_left[0] + [''] * 11)[:11]
+                    if not any(non_empty(v) for v in left_row):
+                        return r
+                except Exception:
+                    time.sleep(0.2)
+                    continue
+            return table_end_row + 1
+
+        results = []
+        for row in rows:
+            target_row = first_empty_row()
+            # 範囲外はエラーにする（枠外書き込み防止）
+            if target_row < start_row or target_row > table_end_row:
+                raise RuntimeError(f"no empty row in range A{start_row}:T{table_end_row}; got target_row={target_row}")
+            target_range = f"{self.sheet_name}!A{target_row}:T{target_row}"
+            try:
+                logging.warning(f"PQ-FORM write target: {target_range}")
+            except Exception:
+                pass
+            body = {"values": [row]}
+            last_exc = None
+            for _ in range(3):
+                try:
+                    res = service.spreadsheets().values().update(
+                        spreadsheetId=self.sheet_id,
+                        range=target_range,
+                        valueInputOption='USER_ENTERED',
+                        body=body
+                    ).execute()
+                    results.append(res)
+                    last_exc = None
+                    break
+                except Exception as e:
+                    last_exc = e
+                    time.sleep(0.5)
+            if last_exc is not None:
+                raise last_exc
+        return {"updated": len(results), "details": results}
+    
+    def _parse_delivery_data(self, rows):
+        """deliveryシートのデータを解析"""
+        if not rows or len(rows) < 2:
+            return None
+        
+        # ヘッダー行をスキップ
+        headers = rows[0]
+        data_rows = rows[1:]
+        
+        today = datetime.now().strftime("%Y/%m/%d")  # 2025/09/04形式
+        print(f"🔍 今日の日付: {today}")
+        print(f"🔍 データ行数: {len(data_rows)}")
+        shipping_data = []
+        
+        for row in data_rows:
+            if len(row) < 6:  # 必要な列数が不足
+                continue
+            
+            # A列: 日付を確認（前後空白・区切り記号の揺れを吸収）
+            row_date = row[0] if len(row) > 0 else ""
+            row_date = str(row_date).strip()
+            m = re.match(r"^(\d{4})\D(\d{1,2})\D(\d{1,2})$", row_date)
+            if m:
+                y, mo, d = m.groups()
+                row_date_norm = f"{int(y):04d}/{int(mo):02d}/{int(d):02d}"
+            else:
+                row_date_norm = row_date
+            print(f"🔍 行の日付: '{row_date}' vs 今日: '{today}'")
+            
+            # 今日のデータのみ処理（正確な日付マッチング）
+            if row_date_norm == today:
+                print(f"✅ マッチした行: {row}")
+                # B列: Delivery-Number, D列: Product Short Description, E列: Quantity, F列: Status
+                delivery_number = row[1] if len(row) > 1 else ""
+                product_description = row[3] if len(row) > 3 else ""
+                quantity = row[4] if len(row) > 4 else ""
+                status = row[5] if len(row) > 5 else ""
+                
+                # ステータスを日本語に変換
+                status_jp = self._convert_status_to_japanese(status)
+                
+                item = {
+                    "code": delivery_number,  # B列: Delivery-Number
+                    "name": product_description,  # D列: Product Short Description
+                    "quantity": quantity,  # E列: Quantity
+                    "status": status_jp,  # F列: Status（日本語変換済み）
+                    "date": row_date
+                }
+                
+                shipping_data.append(item)
+        
+        return shipping_data
+    
+    def _parse_produce_data(self, rows):
+        """produceシートのデータを解析（A列: date, B列: Produce-Number, C列: MachineNumber, E列: Product Short Description, F列: Quantity, G列: Status）"""
+        if not rows or len(rows) < 2:
+            return []
+        
+        # ヘッダー行をスキップ
+        headers = rows[0]
+        data_rows = rows[1:]
+        
+        today = datetime.now().strftime("%Y/%m/%d")  # 2025/09/04形式
+        print(f"🔍 今日の日付: {today}")
+        print(f"🔍 生産データ行数: {len(data_rows)}")
+        production_data = []
+        
+        for row in data_rows:
+            # 仕様変更: C列(MachineNumber)が追加され、以降が1列右へシフト
+            # 必要列: A(0), B(1), C(2), E(4), F(5), G(6)
+            if len(row) < 7:  # 必要な列数が不足
+                continue
+            
+            # A列: 日付を確認（前後空白・区切り記号の揺れを吸収）
+            row_date = row[0] if len(row) > 0 else ""
+            row_date = str(row_date).strip()
+            m = re.match(r"^(\d{4})\D(\d{1,2})\D(\d{1,2})$", row_date)
+            if m:
+                y, mo, d = m.groups()
+                row_date_norm = f"{int(y):04d}/{int(mo):02d}/{int(d):02d}"
+            else:
+                row_date_norm = row_date
+            print(f"🔍 行の日付: '{row_date}' vs 今日: '{today}'")
+            
+            # 今日のデータのみ処理（正確な日付マッチング）
+            if row_date_norm == today:
+                print(f"✅ マッチした生産行: {row}")
+                # B列: Produce-Number, C列: MachineNumber, E列: Product Short Description, F列: Quantity, G列: Status
+                produce_number = row[1] if len(row) > 1 else ""
+                machine_number = row[2] if len(row) > 2 else ""
+                product_description = row[4] if len(row) > 4 else ""
+                quantity = row[5] if len(row) > 5 else ""
+                status = row[6] if len(row) > 6 else ""
+                
+                # ステータスを日本語に変換
+                status_jp = self._convert_production_status_to_japanese(status)
+                
+                item = {
+                    "code": produce_number,  # B列: Produce-Number
+                    "machine": machine_number,  # C列: MachineNumber
+                    "name": product_description,  # E列: Product Short Description
+                    "quantity": quantity,  # F列: Quantity
+                    "status": status_jp,  # G列: Status（日本語変換済み）
+                    "date": row_date
+                }
+                
+                production_data.append(item)
+        
+        return production_data
+    
+    def _convert_status_to_japanese(self, status):
+        """出荷ステータスを日本語に変換"""
+        if status.lower() == "done":
+            return "出貨完"
+        elif status.lower() == "notyet":
+            return "未出貨"
+        else:
+            return "未出貨"  # デフォルト
+    
+    def _convert_production_status_to_japanese(self, status):
+        """生産ステータスを日本語に変換"""
+        if status.lower() == "done":
+            return "生産完"
+        elif status.lower() == "notyet":
+            return "未生産"
+        elif status.lower() == "producing":
+            return "生産中"
+        else:
+            return "未生産"  # デフォルト
+    
+    def _determine_status(self, row):
+        """行データからステータスを判定"""
+        # 在庫数量（E列）に基づいてステータスを判定
+        if len(row) > 4:
+            quantity = row[4]
+            try:
+                qty = int(quantity)
+                if qty > 0:
+                    return "in-progress"
+                else:
+                    return "complete"
+            except:
+                pass
+        
+        # デフォルトは未着手
+        return "pending"
 
 # システムの安定性向上のための設定
 @app.errorhandler(Exception)
@@ -97,6 +677,11 @@ class OptimizedCCTVStream:
         self.frame_cache = {}
         self.cache_lock = threading.Lock()
         
+        # Google Sheets連携
+        self.sheets_manager = GoogleSheetsManager()
+        self.ticker_data = None
+        self.last_ticker_update = 0
+        
         # 持続ストリーム管理
         self.persistent_streams = {}  # チャンネル別の持続ストリーム
         self.stream_threads = {}      # ストリーム処理スレッド
@@ -118,8 +703,32 @@ class OptimizedCCTVStream:
         self.enable_main_detection = True
         self.enable_single_detection = True
 
-        # ウォッチドッグを有効化（長時間動作の安定性向上）
+                # ウォッチドッグを有効化（長時間動作の安定性向上）
         self.enable_watchdog = True
+        
+        # Vercel画像送信設定
+        self.vercel_url = "https://khk-monitor.vercel.app"
+        self.vercel_send_enabled = True
+        self.last_vercel_send_time = 0
+        self.vercel_send_interval = 5  # 5秒間隔で送信
+
+    def send_image_to_vercel(self, frame_base64):
+        """VERCELに画像を送信"""
+        try:
+            current_time = time.time()
+            if current_time - self.last_vercel_send_time >= self.vercel_send_interval:
+                response = requests.post(
+                    f"{self.vercel_url}/receive_image",
+                    json={'image': frame_base64, 'timestamp': current_time},
+                    timeout=10
+                )
+                if response.status_code == 200:
+                    print(f"✅ Vercel画像送信成功: {len(frame_base64)} bytes")
+                else:
+                    print(f"⚠️ Vercel画像送信失敗: {response.status_code}")
+                self.last_vercel_send_time = current_time
+        except Exception as e:
+            print(f"❌ Vercel画像送信エラー: {e}")
 
     def _create_optimized_session(self):
         """最適化されたHTTPセッションを作成"""
@@ -293,12 +902,12 @@ class OptimizedCCTVStream:
         print(f"🔄 指定チャンネル毎秒更新取得開始: {channel_list}")
         frames = {}
         
-        # まずキャッシュから可能な限り取得（短時間キャッシュで毎秒更新に対応）
+        # まずキャッシュから可能な限り取得（短時間キャッシュで高FPS対応）
         for ch in channel_list:
             with self.cache_lock:
                 if ch in self.frame_cache:
                     cache_time, cached_frame = self.frame_cache[ch]
-                    if time.time() - cache_time < 2:  # 2秒キャッシュで毎秒更新
+                    if time.time() - cache_time < 0.5:  # 0.5秒キャッシュで ~3fps 対応
                         frames[ch] = cached_frame
                         print(f"✅ CH{ch} キャッシュから取得成功")
         
@@ -307,8 +916,8 @@ class OptimizedCCTVStream:
         if missing_channels:
             print(f"🔄 新規取得が必要なチャンネル: {missing_channels}")
             
-            # 並列処理で4画面を同時取得（毎秒更新に対応）
-            with ThreadPoolExecutor(max_workers=4) as executor:
+            # 並列処理で5画面まで同時取得（CCTV負荷を抑えつつ高FPS化）
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_channel = {
                     executor.submit(self._get_channel_frame_with_detection, ch, with_detection): ch 
                     for ch in missing_channels
@@ -336,7 +945,7 @@ class OptimizedCCTVStream:
             with self.cache_lock:
                 if channel in self.frame_cache:
                     cache_time, cached_frame = self.frame_cache[channel]
-                    if time.time() - cache_time < 1:  # 1秒キャッシュ
+                    if time.time() - cache_time < 0.3:  # 0.3秒キャッシュで滑らかさを確保
                         return cached_frame
             
             # 高速スナップショット取得
@@ -369,7 +978,7 @@ class OptimizedCCTVStream:
             with self.cache_lock:
                 if channel in self.frame_cache:
                     cache_time, cached_frame = self.frame_cache[channel]
-                    if time.time() - cache_time < 1:  # 1秒キャッシュ
+                    if time.time() - cache_time < 0.3:  # 0.3秒キャッシュで滑らかさを確保
                         return cached_frame
             
             # 高速スナップショット取得
@@ -393,7 +1002,7 @@ class OptimizedCCTVStream:
                                 processed_frame, detections = self.detect_objects_fast(frame)
                                 
                                 _, buffer_encoded = cv2.imencode('.jpg', processed_frame, 
-                                                               [cv2.IMWRITE_JPEG_QUALITY, 80])
+                                                               [cv2.IMWRITE_JPEG_QUALITY, 70])
                                 frame_base64 = base64.b64encode(buffer_encoded).decode('utf-8')
                                 
                                 # 検知結果をログ出力
@@ -495,8 +1104,10 @@ class OptimizedCCTVStream:
             detections = []
             # 許可クラスとクラス別しきい値
             allowed_class_ids = {0, 1, 2, 5, 6, 7}  # person, bicycle, car, bus, train, truck
-            person_conf_threshold = 0.2
-            default_conf_threshold = 0.5
+            person_conf_threshold = 0.20
+            vehicle_conf_threshold = 0.35   # car/bus/train/truck を拾いやすく
+            bicycle_conf_threshold = 0.40
+            default_conf_threshold = 0.50
             
             for result in results:
                 boxes = result.boxes
@@ -509,7 +1120,14 @@ class OptimizedCCTVStream:
                         if cls not in allowed_class_ids:
                             continue
                         # クラス別しきい値
-                        threshold = person_conf_threshold if cls == 0 else default_conf_threshold
+                        if cls == 0:  # person
+                            threshold = person_conf_threshold
+                        elif cls in {2, 5, 6, 7}:  # car/bus/train/truck
+                            threshold = vehicle_conf_threshold
+                        elif cls == 1:  # bicycle
+                            threshold = bicycle_conf_threshold
+                        else:
+                            threshold = default_conf_threshold
                         if conf > threshold:
                             x1, y1, x2, y2 = int(x1/scale_factor), int(y1/scale_factor), int(x2/scale_factor), int(y2/scale_factor)
                             
@@ -601,6 +1219,23 @@ class OptimizedCCTVStream:
         
         print(f"🔄 CH{channel} 持続ストリームワーカー終了")
     
+    def get_ticker_data(self, force_update=False):
+        """ティッカーデータを取得（Google Sheets連携）"""
+        current_time = time.time()
+        
+        # 強制更新または10分間隔でデータを更新（本番）
+        if force_update or current_time - self.last_ticker_update > 600:  # 10分 = 600秒
+            try:
+                print("🔄 Google Sheetsから最新データを取得中...")
+                self.ticker_data = self.sheets_manager.fetch_today_data()
+                self.last_ticker_update = current_time
+                print("📊 ティッカーデータを更新しました")
+            except Exception as e:
+                print(f"⚠️ ティッカーデータ更新エラー: {e}")
+                # エラー時は既存データを維持
+        
+        return self.ticker_data
+    
     def start_optimized_stream(self):
         """最適化されたストリーム開始（メインストリーム方式）"""
         # 持続ストリームは無効化（接続エラー対策）
@@ -658,6 +1293,10 @@ class OptimizedCCTVStream:
                                 # まず即表示（エンコードし直さない）
                                 self.current_frame = base64.b64encode(jpeg_data).decode('utf-8')
                                 self.last_frame_time = time.time()
+                                
+                                # Vercelに画像を送信
+                                self.send_image_to_vercel(self.current_frame)
+                                
                                 # YOLO処理（間引き）
                                 current_time = time.time()
                                 if self.enable_main_detection and (current_time - last_yolo_time) >= 2.0:
@@ -671,6 +1310,9 @@ class OptimizedCCTVStream:
                                                                        [cv2.IMWRITE_JPEG_QUALITY, 80])
                                         self.current_frame = base64.b64encode(buffer_encoded).decode('utf-8')
                                         self.detection_results = detections
+                                        
+                                        # Vercelに検出結果付き画像を送信
+                                        self.send_image_to_vercel(self.current_frame)
                                         
                                         last_yolo_time = current_time
                                         frame_count += 1
@@ -723,8 +1365,53 @@ class OptimizedCCTVStream:
         self.current_single_detections = []
         return True
 
-# グローバルインスタンス
-cctv_system = OptimizedCCTVStream()
+# グローバルインスタンス（遅延初期化に変更）
+cctv_system = None
+
+def get_cctv_system():
+    """CCTVシステムの遅延初期化。接続失敗時でもFlaskは起動継続。"""
+    global cctv_system
+    if cctv_system is None:
+        print("🚀 CCTVシステム初期化開始...")
+        try:
+            cctv_system_local = OptimizedCCTVStream()
+            cctv_system = cctv_system_local
+            print("✅ CCTVシステム初期化完了")
+        except Exception as e:
+            print(f"❌ CCTVシステム初期化エラー: {e}")
+            # 初期化に失敗してもアプリは継続
+            cctv_system = None
+    return cctv_system
+
+@app.route('/favicon.ico')
+def favicon():
+    """favicon.icoのルート（500エラー防止）"""
+    return '', 204  # No Content
+
+@app.route('/api/ticker_data')
+def get_ticker_data():
+    """ティッカーデータ取得API（Google Sheets連携）"""
+    try:
+        # 遅延初期化
+        cs = get_cctv_system()
+        if cs is None:
+            return jsonify({'success': False, 'error': 'CCTVシステムが初期化できません'})
+        
+        # クエリパラメータで強制更新を制御
+        force_update = request.args.get('force', 'false').lower() == 'true'
+        
+        ticker_data = cs.get_ticker_data(force_update=force_update)
+        return jsonify({
+            'success': True,
+            'data': ticker_data,
+            'timestamp': time.time(),
+            'force_update': force_update
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/')
 def index():
@@ -887,16 +1574,21 @@ def index():
               .view-controls { gap: 8px; row-gap: 8px; }
             }
             
-            /* ティッカー表示用スタイル */
-            .ticker-container {
-                background: rgba(0, 0, 0, 0.95);
-                color: white;
-                padding: 8px 12px;
-                margin: 8px 0;
-                border-radius: 8px;
-                font-size: 14px;
-                line-height: 1.2;
-            }
+                    /* ティッカー表示用スタイル */
+        .ticker-container {
+            background: rgba(0, 0, 0, 0.95);
+            color: white;
+            padding: 8px 12px;
+            margin: 8px 0;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.2;
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            right: 10px;
+            z-index: 1000;
+        }
             
             .ticker-content {
                 display: flex;
@@ -919,7 +1611,7 @@ def index():
                 margin: 2px 0;
                 animation: blink 6s ease-in-out infinite;
                 animation-delay: calc(var(--delay) * 0.3s);
-                font-size: 16px;
+                font-size: 15px;
             }
             
             .ticker-text:nth-child(1) { --delay: 1; }
@@ -990,38 +1682,20 @@ def index():
                 <div class="ticker-content">
                     <div class="ticker-item">
                         <div class="ticker-label">本日生産</div>
-                                                    <div class="ticker-text complete">
-                                <span class="status-icon status-complete">●</span>
-                                K#2504035 0.40x64 0.4x32x32AL批灰角24400-519-生産完
-                            </div>
-                            <div class="ticker-text in-progress">
-                                <span class="status-icon status-in-progress">●</span>
-                                K#2412168 0.40x64 0.4x32x32AL批灰角24400-300-生産中
-                            </div>
-                            <div class="ticker-text pending">
-                                <span class="status-icon status-pending">●</span>
-                                K#2412300 0.40x64 0.4x32x32AL批灰角24400-250-未生産
-                            </div>
+                        <div id="productionItems">
+                            <!-- 動的にGoogle Sheetsデータが表示されます -->
+                        </div>
                     </div>
                     <div class="ticker-item">
                         <div class="ticker-label">本日出貨</div>
-                                                    <div class="ticker-text pending">
-                                <span class="status-icon status-pending">●</span>
-                                SC/20250B/64 50mm企筒2440mm45高1.5厚(藍帯)用料147.0mm-40支-未出貨
-                            </div>
-                            <div class="ticker-text complete">
-                                <span class="status-icon status-complete">●</span>
-                                SC/20250B/65 50mm企筒2440mm45高1.5厚(藍帯)用料138.2mm-10支-出貨完
-                            </div>
-                            <div class="ticker-text complete">
-                                <span class="status-icon status-complete">●</span>
-                                SC/20250B/75 76mm企筒2440mm45高1.2厚(-帯)用料172.0mm-30支-出貨完
-                            </div>
+                        <div id="shippingItems">
+                            <!-- 動的にGoogle Sheetsデータが表示されます -->
+                        </div>
                     </div>
                 </div>
             </div>
             
-            <div class="video-container" style="margin-bottom: 0;">
+            <div class="video-container" style="margin-bottom: 0; position: relative;">
                 <div class="video-section">
                     <!-- 單一畫面 -->
                     <div id="singleView" class="video-display">
@@ -1053,6 +1727,7 @@ def index():
                 <button class="view-btn" onclick="toggleCycleExpanded()" id="btnCycleExpanded">循拡</button>
                 <button class="view-btn" onclick="toggleRemote()" id="btnRemote">遙控</button>
                 <button id="debugLogBtn" class="view-btn" onclick="toggleDebugLog()">Log-on</button>
+                <button id="tickerToggleBtn" class="view-btn" onclick="toggleTicker()">T-on/off</button>
             </div>
 
             <div id="channelSelector" class="channel-select" style="display:grid;">
@@ -1127,6 +1802,7 @@ def index():
             let isCycleExpanded = false; // 循拡モードフラグ
             let autoResetInterval = null; // 自動リセット用（現在は無効化）
             let lastResetTime = Date.now();
+            let tickerVisible = true; // ティッカー表示状態
             
             
             function toggleStream() {
@@ -1164,23 +1840,49 @@ def index():
             }
 
             function startAutoReset() {
-                // 自動リセット機能を無効化（システム安定性のため）
+                // 自動リセット機能を10分間隔で有効化（テスト用）
                 if (autoResetInterval) clearInterval(autoResetInterval);
-                autoResetInterval = null;
-                console.log('🔧 自動リセット機能を無効化しました（システム安定性向上）');
+                autoResetInterval = setInterval(performAutoReset, 10 * 60 * 1000); // 10分間隔
+                console.log('🔧 自動リセット機能を10分間隔で有効化しました（テスト用）');
             }
 
             function performAutoReset() {
-                // 自動リセット機能を無効化（システム安定性のため）
-                console.log('🔧 自動リセット機能は無効化されています');
-                return;
+                // 自動リセット機能を10分間隔で実行（テスト用）
+                console.log('🔄 自動リセット実行: ' + new Date().toLocaleTimeString());
+                updateStatus('🔄 自動リセット実行中...', 'info');
+                
+                // システムを再起動
+                stopStream();
+                setTimeout(() => {
+                    startStream();
+                    updateStatus('✅ 自動リセット完了', 'success');
+                }, 2000);
             }
 
-            // ページ読込時に再ログイン→メインストリーム開始（安定化）
+            // ページ読込時に自動で「開控」状態になり、「循拡」表示で、ティッカーを「T-on」状態で起動
             window.addEventListener('load', async () => {
-                // 自動接続は行わず、ユーザーが「開控」を押した時だけ開始する
-                changeView(1);
-                updateStatus('🔧 最適化CCTV監視システム準備完了（待機中）', 'info');
+                // 自動で「開控」状態を開始
+                startStream();
+                
+                // デフォルト表示を「循拡」に設定
+                toggleCycleExpanded();
+                
+                // ティッカーを「T-on」状態に設定
+                tickerVisible = true;
+                const tickerContainer = document.getElementById('tickerContainer');
+                const tickerToggleBtn = document.getElementById('tickerToggleBtn');
+                if (tickerContainer && tickerToggleBtn) {
+                    tickerContainer.style.display = 'block';
+                    tickerToggleBtn.textContent = 'T-off';
+                    tickerToggleBtn.classList.add('active');
+                    // 起動時に即時データ取得（強制更新）
+                    updateTickerContent(true);
+                }
+                
+                // 自動リセット機能は完全無効化（24時間安定監視のため）
+                // startAutoReset();
+                
+                updateStatus('🔧 最適化CCTV監視システム準備完了（自動起動・循拡表示・ティッカーON・24時間安定監視）', 'success');
             });
             
             function stopStream() {
@@ -1478,6 +2180,29 @@ def index():
                 btn.textContent = 'Log-on';
                 btn.className = 'view-btn';
                 console.log('🔇 デバッグログを無効にしました');
+            }
+        }
+
+        // ティッカー表示切り替え
+        function toggleTicker() {
+            const tickerContainer = document.getElementById('tickerContainer');
+            const btn = document.getElementById('tickerToggleBtn');
+            
+            tickerVisible = !tickerVisible;
+            
+            if (tickerVisible) {
+                tickerContainer.style.display = 'block';
+                btn.textContent = 'T-off';
+                btn.classList.add('active');
+                debugLog('📺 ティッカー表示有効', true);
+                // ティッカー表示時に即座にデータを取得（強制更新）
+                console.log('🚀 T-onボタン押下: 即座にデータ取得開始');
+                updateTickerContent(true);  // 強制更新
+            } else {
+                tickerContainer.style.display = 'none';
+                btn.textContent = 'T-on';
+                btn.classList.remove('active');
+                debugLog('📺 ティッカー表示無効', true);
             }
         }
             
@@ -1976,11 +2701,69 @@ def index():
             // ティッカー機能
             function initTicker() {
                 updateTickerContent();
+                // 10分間隔でティッカーデータを更新（本番）
+                setInterval(updateTickerContent, 10 * 60 * 1000);
             }
             
-            function updateTickerContent() {
-                // ティッカーの内容を更新（必要に応じて）
-                console.log('ティッカー表示開始');
+            function updateTickerContent(forceUpdate = false) {
+                console.log('🔄 ティッカーデータを取得中...' + (forceUpdate ? ' (強制更新)' : ''));
+                // Google Sheets APIからティッカーデータを取得
+                const url = forceUpdate ? '/api/ticker_data?force=true' : '/api/ticker_data';
+                fetch(url)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('📊 ティッカーデータ取得結果:', data);
+                        if (data.success) {
+                            renderTickerData(data.data);
+                        } else {
+                            console.error('ティッカーデータ取得エラー:', data.error);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('ティッカーデータ取得失敗:', error);
+                    });
+            }
+            
+            function renderTickerData(tickerData) {
+                // 生産データを表示（produceシートから取得）
+                const productionContainer = document.getElementById('productionItems');
+                if (productionContainer) {
+                    if (tickerData.production && tickerData.production.length > 0) {
+                        productionContainer.innerHTML = tickerData.production.map(item => {
+                            let statusClass = 'pending';
+                            if (item.status === '生産完') {
+                                statusClass = 'complete';
+                            } else if (item.status === '生産中') {
+                                statusClass = 'in-progress';
+                            }
+                            const machineTag = item.machine ? ` #${item.machine}` : '';
+                            return `
+                                <div class="ticker-text ${statusClass}">
+                                    <span class="status-icon status-${statusClass}">●</span>
+                                    ${item.code}${machineTag} ${item.name}-${item.quantity}-${item.status}
+                                </div>
+                            `;
+                        }).join('');
+                    } else {
+                        productionContainer.innerHTML = '<div class="ticker-text pending">no-data</div>';
+                    }
+                }
+                
+                // 出貨データを表示（新しいフォーマット）
+                const shippingContainer = document.getElementById('shippingItems');
+                if (shippingContainer && tickerData.shipping && tickerData.shipping.length > 0) {
+                    shippingContainer.innerHTML = tickerData.shipping.map(item => {
+                        const statusClass = item.status === '出貨完' ? 'complete' : 'pending';
+                        return `
+                            <div class="ticker-text ${statusClass}">
+                                <span class="status-icon status-${statusClass}">●</span>
+                                ${item.code} ${item.name}-${item.quantity}-${item.status}
+                            </div>
+                        `;
+                    }).join('');
+                } else {
+                    shippingContainer.innerHTML = '<div class="ticker-text pending">no-data</div>';
+                }
             }
             
             // ページ読み込み時にティッカーを初期化
@@ -1997,13 +2780,16 @@ def index():
 def start_stream():
     """ストリーム開始"""
     try:
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
         # 毎回セッションを張り直して古い認証・接続を掃除
-        cctv_system.reset_session()
-        success = cctv_system.start_optimized_stream()
+        cs.reset_session()
+        success = cs.start_optimized_stream()
         # 起動後、保存された表示モードを反映
         try:
-            vm = int(cctv_system.ui_state.get('view_mode', 1))
-            cctv_system.change_view_mode(vm)
+            vm = int(cs.ui_state.get('view_mode', 1))
+            cs.change_view_mode(vm)
         except Exception:
             pass
         return jsonify({'success': success})
@@ -2013,14 +2799,20 @@ def start_stream():
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
     """ストリーム停止"""
-    cctv_system.stop_stream()
+    cs = get_cctv_system()
+    if not cs:
+        return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+    cs.stop_stream()
     return jsonify({'success': True})
 
 @app.route('/relogin', methods=['POST'])
 def relogin():
     """HTTPセッションを再生成（再ログイン）"""
     try:
-        cctv_system.reset_session()
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+        cs.reset_session()
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -2036,13 +2828,25 @@ def set_ui_state():
                 # view_mode/selected_channel は数値化
                 if key in ('view_mode', 'selected_channel'):
                     try:
-                        cctv_system.ui_state[key] = int(data[key])
+                        cs = get_cctv_system()
+                        if not cs:
+                            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+                        cs.ui_state[key] = int(data[key])
                     except Exception:
-                        cctv_system.ui_state[key] = data[key]
+                        cs = get_cctv_system()
+                        if not cs:
+                            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+                        cs.ui_state[key] = data[key]
                 else:
-                    cctv_system.ui_state[key] = data[key]
-        print(f"🧭 UI状態更新: {cctv_system.ui_state}")
-        return jsonify({'success': True, 'ui_state': cctv_system.ui_state})
+                    cs = get_cctv_system()
+                    if not cs:
+                        return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+                    cs.ui_state[key] = data[key]
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+        print(f"🧭 UI状態更新: {cs.ui_state}")
+        return jsonify({'success': True, 'ui_state': cs.ui_state})
     except Exception as e:
         print(f"🧭 UI状態更新エラー: {e}")
         return jsonify({'success': False, 'error': str(e)})
@@ -2051,18 +2855,24 @@ def set_ui_state():
 def get_ui_state():
     """現在のUI状態を返す（デバッグ用）"""
     try:
-        return jsonify({'success': True, 'ui_state': cctv_system.ui_state})
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+        return jsonify({'success': True, 'ui_state': cs.ui_state})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/get_frame')
 def get_frame():
     """フレーム取得"""
-    if cctv_system.current_frame:
+    cs = get_cctv_system()
+    if not cs:
+        return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+    if cs.current_frame:
         return jsonify({
             'success': True, 
-            'frame': cctv_system.current_frame,
-            'detections': cctv_system.detection_results
+            'frame': cs.current_frame,
+            'detections': cs.detection_results
         })
     else:
         return jsonify({'success': False})
@@ -2071,6 +2881,9 @@ def get_frame():
 def get_multi_frames(num_channels):
     """複数チャンネルのフレームを取得"""
     try:
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
         # 単一チャンネル指定に対応: /get_multi_frames/1?channel=<n>
         channel_q = request.args.get('channel')
         # 循面用の複数チャンネル指定に対応: /get_multi_frames/6?channels=2,3,4,7,11,14
@@ -2080,29 +2893,29 @@ def get_multi_frames(num_channels):
         if num_channels == 1 and channel_q:
             # UI状態を保存（単一モード）
             try:
-                cctv_system.ui_state['single_channel_mode'] = True
-                cctv_system.ui_state['selected_channel'] = int(channel_q)
+                cs.ui_state['single_channel_mode'] = True
+                cs.ui_state['selected_channel'] = int(channel_q)
             except Exception:
                 pass
-            b64, dets = cctv_system.get_single_channel_frame_optimized(channel_q, with_detection=with_dets)
+            b64, dets = cs.get_single_channel_frame_optimized(channel_q, with_detection=with_dets)
             frames = {int(channel_q): b64} if b64 else {}
             detections = dets if with_dets else []
         elif channels_q:
             # 指定されたチャンネルのみを取得（循面用）
             try:
-                cctv_system.ui_state['single_channel_mode'] = False
+                cs.ui_state['single_channel_mode'] = False
             except Exception:
                 pass
             channel_list = [int(ch) for ch in channels_q.split(',') if ch.strip()]
-            frames = cctv_system.get_specific_channels_frames(channel_list, with_detection=with_dets)
+            frames = cs.get_specific_channels_frames(channel_list, with_detection=with_dets)
             detections = []
         else:
             # 単一モード解除
             try:
-                cctv_system.ui_state['single_channel_mode'] = False
+                cs.ui_state['single_channel_mode'] = False
             except Exception:
                 pass
-            frames = cctv_system.get_multi_channel_frames_parallel(num_channels)
+            frames = cs.get_multi_channel_frames_parallel(num_channels)
             detections = []
         
         # バイナリデータをbase64エンコード
@@ -2137,12 +2950,15 @@ def get_multi_frames(num_channels):
 def single_stream():
     """指定チャンネルのMJPEGをそのままプロキシして配信"""
     try:
+        cs = get_cctv_system()
+        if not cs:
+            return Response(status=503)
         channel_q = request.args.get('channel', default='1')
         ch = int(channel_q)
-        stream_url = cctv_system.get_channel_stream_url(ch)
+        stream_url = cs.get_channel_stream_url(ch)
 
         def generate():
-            with requests.get(stream_url, auth=HTTPBasicAuth(cctv_system.username, cctv_system.password), stream=True, timeout=(2, 10), verify=False) as r:
+            with requests.get(stream_url, auth=HTTPBasicAuth(cs.username, cs.password), stream=True, timeout=(2, 10), verify=False) as r:
                 for chunk in r.iter_content(chunk_size=4096):
                     if chunk:
                         yield chunk
@@ -2161,15 +2977,18 @@ def single_stream():
 @app.route('/start_single_stream')
 def http_start_single_stream():
     try:
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
         ch_q = request.args.get('channel', default='1')
         ch = int(ch_q)
         print(f"🔁 單一/循面 切替要求: ch={ch}")
-        ok = cctv_system.start_single_channel_stream(ch)
+        ok = cs.start_single_channel_stream(ch)
         print(f"🔁 切替結果: ch={ch} -> {'成功' if ok else '失敗'}")
         # UI状態も併せて更新
         try:
-            cctv_system.ui_state['single_channel_mode'] = True
-            cctv_system.ui_state['selected_channel'] = ch
+            cs.ui_state['single_channel_mode'] = True
+            cs.ui_state['selected_channel'] = ch
         except Exception:
             pass
         return jsonify({'success': bool(ok), 'channel': ch})
@@ -2179,7 +2998,10 @@ def http_start_single_stream():
 @app.route('/stop_single_stream')
 def http_stop_single_stream():
     try:
-        ok = cctv_system.stop_single_channel_stream()
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+        ok = cs.stop_single_channel_stream()
         return jsonify({'success': bool(ok)})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -2187,8 +3009,11 @@ def http_stop_single_stream():
 @app.route('/get_single_frame')
 def http_get_single_frame():
     try:
-        if cctv_system.current_single_frame:
-            return jsonify({'success': True, 'frame': cctv_system.current_single_frame, 'detections': cctv_system.current_single_detections})
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
+        if cs.current_single_frame:
+            return jsonify({'success': True, 'frame': cs.current_single_frame, 'detections': cs.current_single_detections})
         return jsonify({'success': False})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -2264,17 +3089,20 @@ def remote_control():
 def change_view(view_mode):
     """CCTV分割表示を変更"""
     try:
+        cs = get_cctv_system()
+        if not cs:
+            return jsonify({'success': False, 'error': 'CCTV未初期化'}), 503
         # 🚀 まず現在の処理を中断
-        cctv_system.interrupt_current_processing()
+        cs.interrupt_current_processing()
         print(f"🛑 既存処理中断 -> {view_mode}分割表示に切替")
 
         # UI状態を保存
         try:
-            cctv_system.ui_state['view_mode'] = int(view_mode)
+            cs.ui_state['view_mode'] = int(view_mode)
         except Exception:
             pass
 
-        success = cctv_system.change_view_mode(view_mode)
+        success = cs.change_view_mode(view_mode)
         
         view_names = {1: '單一畫面', 4: '4分割畫面', 9: '9分割畫面', 16: '16分割畫面'}
         
@@ -2302,19 +3130,95 @@ if __name__ == '__main__':
     
     def signal_handler(sig, frame):
         print(f"\n🛑 シグナル {sig} を受信 - システムを安全に終了します")
+        # すべてのスレッドを安全に終了
+        cs = get_cctv_system()
+        if cs and hasattr(cs, 'single_stream_thread') and cs.single_stream_thread:
+            cs.single_stream_stop = True
+            if cs.single_stream_thread.is_alive():
+                cs.single_stream_thread.join(timeout=2)
+        
+        # 現在の処理を中断
+        if cs:
+            cs.interrupt_current_processing()
+        
+        # PIDファイルを削除
+        try:
+            import os
+            pid_file = "cctv_system.pid"
+            if os.path.exists(pid_file):
+                os.remove(pid_file)
+                print("🗑️  PIDファイルを削除")
+        except Exception as e:
+            print(f"⚠️  PIDファイル削除エラー: {e}")
+        
+        print("🔄 システム終了処理完了")
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
+        # ポート5013が使用中かチェック（netstatを使わない方法）
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('127.0.0.1', 5013))
+        sock.close()
+        
+        if result == 0:
+            print("⚠️  ポート5013が既に使用中です。既存のプロセスを終了してください。")
+            
+            # PIDファイルから既存プロセスIDを確認
+            try:
+                import os
+                pid_file = "cctv_system.pid"
+                if os.path.exists(pid_file):
+                    with open(pid_file, 'r') as f:
+                        old_pid = f.read().strip()
+                    print(f"🔍 既存プロセスID: {old_pid}")
+                    
+                    # 既存プロセスを終了
+                    try:
+                        import psutil
+                        if psutil.pid_exists(int(old_pid)):
+                            print(f"🔄 既存プロセス {old_pid} を終了中...")
+                            os.system(f"taskkill /PID {old_pid} /F")
+                            time.sleep(2)  # 終了待機
+                    except Exception as e:
+                        print(f"⚠️  プロセス終了エラー: {e}")
+            except Exception as e:
+                print(f"⚠️  PIDファイル読み込みエラー: {e}")
+            
+            # 再度ポートチェック
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            result = sock.connect_ex(('127.0.0.1', 5013))
+            sock.close()
+            
+            if result == 0:
+                print("❌ ポート5013がまだ使用中です。手動でプロセスを終了してください。")
+                input("Enterキーを押して終了...")
+                sys.exit(1)
+        
+        print("✅ ポート5013は利用可能です")
+        
+        # プロセスIDをファイルに保存（終了時の管理用）
+        import os
+        pid_file = "cctv_system.pid"
+        with open(pid_file, 'w') as f:
+            f.write(str(os.getpid()))
+        print(f"📝 プロセスID {os.getpid()} を {pid_file} に保存")
+        
         # メモリ使用量の監視とログ出力（一時的に無効化）
         # import psutil
         # process = psutil.Process()
         # print(f"💾 初期メモリ使用量: {process.memory_info().rss / 1024 / 1024:.1f} MB")
         
-        print("🚀 Flaskサーバー起動中...")
-        app.run(host='0.0.0.0', port=5013, debug=False, threaded=True)
+        print("🚀 サーバー起動中 (waitress)...")
+        try:
+            from waitress import serve
+            serve(app, host='0.0.0.0', port=5013, threads=8)
+        except ImportError:
+            print("⚠️ waitress未インストールのためFlask内蔵サーバーで起動します")
+            app.run(host='0.0.0.0', port=5013, debug=False, threaded=True)
     except Exception as e:
         print(f"❌ サーバー起動エラー: {e}")
         print(f"🔍 エラーの詳細: {type(e).__name__}")

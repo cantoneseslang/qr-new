@@ -1,4 +1,4 @@
-# khk-ai-detect-monitor
+# khk-monitor
 
 Factory monitoring system entry point for Vercel deployment.
 

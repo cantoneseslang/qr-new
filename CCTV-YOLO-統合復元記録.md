@@ -547,6 +547,118 @@ print(f"💾 初期メモリ使用量: {process.memory_info().rss / 1024 / 1024:
 
 ---
 
+## 0. 5013/5508 の役割と標準運用（重要・固定方針）
+
+- **5013（Flask本体）**: `cctv_streaming_fixed.py`。CCTV監視＋API（/api/...、/get_frame等）。これは唯一のサーバ本体。
+- **5508（静的UI）**: `vercel_minimal/pq-form` のフロントUIのみ。`python -m http.server 5508` で提供。
+- **Vercelは使用しない**: 本番/ローカルともに Flask のみで運用（UIはローカル静的配信）。
+
+禁止・注意:
+- ❌ ルート直下（`E:\factory_monitoring_system`）で `http.server` を起動しない（モニター等の別ファイルが見える/紛れる原因）。
+- ❌ 5508にFlask本体を割り当てない。5013と5508は厳密に役割分離。
+- ✅ 5508は必ず `E:\factory_monitoring_system\vercel_minimal\pq-form` で起動。
+
+### 正しい停止・再起動手順（標準・唯一の手順）
+
+1) 完全停止（ポート単位でPID終了）
+```powershell
+# 5013 (Flask) を停止
+$pid5013 = (Get-NetTCPConnection -LocalPort 5013 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($pid5013){ Stop-Process -Id $pid5013 -Force }
+
+# 5508 (静的UI) を停止
+$pid5508 = (Get-NetTCPConnection -LocalPort 5508 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($pid5508){ Stop-Process -Id $pid5508 -Force }
+```
+
+2) Flask本体（5013）起動（このワンライナーのみ使用）
+```powershell
+cd E:\factory_monitoring_system; $env:PQFORM_SHEET_ID="1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M"; $env:GOOGLE_SA_FILE="C:\Users\Satoshi\Downloads\cursor-434016-198bf8b96199.json"; $env:ENABLE_DEBUG_LOG="0"; python cctv_streaming_fixed.py
+# ブラウザ: http://localhost:5013
+```
+
+3) pq-form UI（5508）起動（別ターミナル）
+```powershell
+cd E:\factory_monitoring_system\vercel_minimal\pq-form
+python -m http.server 5508 --bind 127.0.0.1
+# ブラウザ: http://127.0.0.1:5508
+```
+
+4) 確認
+```powershell
+netstat -ano | findstr :5013
+netstat -ano | findstr :5508
+```
+
+補足:
+- `vercel_minimal/pq-form/index.html` が欠損すると 5508 は 404 になる。必ず存在確認。
+- 5508がモニター画面になる原因は「起動ディレクトリの誤り」。必ず `pq-form` 直下で起動すること。
+- この節に記載の手順以外で再起動しないこと（他の再起動手順は使用禁止）。
+
+### ワンコマンド起動（再発防止用）
+
+- 前景でFlask（5013）＋ 背景でUI（5508）を正しく起動するスクリプト：
+  ```powershell
+  .\monitor_service.ps1            # 通常ログ
+  .\monitor_service.ps1 -DebugLog  # デバッグログ有効
+  ```
+- Flaskのみ起動する簡易版：
+  ```powershell
+  .\start_service.ps1
+  ```
+
+これらはPIDで既存プロセスを安全に停止し、正しいディレクトリから確実に起動します。
+
+---
+
+## 11. Vercelデプロイ情報（正しい設定）
+
+### 11.1 正しいプロジェクト情報
+**以下の情報以外は一切存在しません（削除済み）**
+
+#### 🔑 プロジェクト情報
+- **プロジェクト名**: `khk-monitor`
+- **プロジェクトID**: `prj_8tx0A5scrtndxx0Z2dBac5FLhTm5`
+- **アカウント**: `kirii`
+- **固定URL**: `https://khk-monitor.vercel.app`
+- **Vercel URL**: `vercel.com/kirii/khk-monitor`
+
+### 11.2 デプロイ方法（MDファイル記載の正しい手順）
+
+#### ✅ 正しいVercelデプロイ手順（唯一の正解）
+
+##### 🚀 自動化版（推奨）
+```powershell
+# PowerShellスクリプトで自動デプロイ
+.\auto_deploy_vercel.ps1
+```
+
+##### 📋 手動版（初回のみ）
+##### 手順1: 現在のプロジェクトを確認
+```bash
+vercel projects ls
+```
+
+##### 手順2: 正しいプロジェクトが表示されるまでアカウントを切り替え
+```bash
+vercel logout
+vercel login
+```
+
+##### 手順3: 正しいプロジェクトが表示されたら、そのプロジェクトにリンク
+```bash
+vercel link
+```
+
+##### 手順4: デプロイ
+```bash
+vercel --prod
+```
+
+### 11.3 削除済みの間違った情報
+**以下の情報は完全に削除済み（二度と出ない）**
+- ~~プロジェクトID: `prj_LM8Qz5DLaRvwTrYUfWIu848YLc3j`~~
+- ~~組織ID: `team_hfdVMgcn7GojZhG8Cz5Pb3iA`~~
+- ~~プロジェクト名: `khk-monitor`~~
+
 ---
 
 ## 10. デバッグログ制御システム（環境変数による診断機能）

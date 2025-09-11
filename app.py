@@ -734,7 +734,8 @@ def index():
         </div>
         
         <div class="footer">
-            STOCK-AI-SCAN v2.0 | 番号ベースQRコード対応 | 📊 Googleシート連携
+            STOCK-AI-SCAN / 庫存及AIQR掃描儀<br>
+            Copyright © Kirii (Hong Kong) Limited. All Rights Reserved.
         </div>
     </div>
     
@@ -1286,7 +1287,8 @@ def product_detail(product_number):
         </div>
         
         <div class="footer">
-            STOCK-AI-SCAN | QR Inventory Management System / QR碼庫存管理系統
+            STOCK-AI-SCAN / 庫存及AIQR掃描儀<br>
+            Copyright © Kirii (Hong Kong) Limited. All Rights Reserved.
         </div>
     </div>
     

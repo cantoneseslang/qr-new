@@ -247,7 +247,7 @@ class KiriiInventoryPlatform:
 
 platform = KiriiInventoryPlatform()
 
-ALLOWED_REFERRERS = set([d.strip().lower() for d in os.getenv('ALLOWED_REFERRERS', 'kirii-portfolio-1.vercel.app').split(',') if d.strip()])
+ALLOWED_REFERRERS = set([d.strip().lower() for d in os.getenv('ALLOWED_REFERRERS', 'qr-new-six.vercel.app').split(',') if d.strip()])
 STRICT_REFERER = os.getenv('STRICT_REFERER', '0') != '0'  # デフォルトで無効化
 
 @app.before_request

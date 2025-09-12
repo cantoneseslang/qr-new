@@ -247,34 +247,15 @@ class KiriiInventoryPlatform:
 
 platform = KiriiInventoryPlatform()
 
-ALLOWED_REFERRERS = set([d.strip().lower() for d in os.getenv('ALLOWED_REFERRERS', 'qr-new-six.vercel.app').split(',') if d.strip()])
-STRICT_REFERER = os.getenv('STRICT_REFERER', '0') != '0'  # デフォルトで無効化
-
+# ロゴとファビコンの例外処理のみ有効（認証チェック無効化）
 @app.before_request
-def enforce_referer_protection():
-    if not STRICT_REFERER:
+def handle_static_files():
+    # ロゴとファビコンは許可
+    if request.path.startswith('/static/logo') or request.path == '/favicon.ico':
         return
-    path = request.path or '/'
-    # 例外（ロゴ/ファビコン）
-    if path.startswith('/static/logo') or path == '/favicon.ico':
-        return
-    # ローカル開発は許可
-    if request.host.startswith('localhost') or request.host.startswith('127.0.0.1'):
-        return
-    referer = request.headers.get('Referer', '')
-    # リファラが無い場合は拒否
-    if not referer:
-        abort(401)
-    try:
-        ref_host = urlparse(referer).hostname or ''
-        req_host = request.host.split(':')[0].lower()
-        if ref_host.lower() == req_host:
-            return
-        if ref_host.lower() in ALLOWED_REFERRERS:
-            return
-    except Exception:
-        pass
-    abort(401)
+    
+    # 認証チェックは無効化（誰でもアクセス可能）
+    return
 
 @app.errorhandler(401)
 def handle_unauthorized(_e):
@@ -307,7 +288,7 @@ def handle_unauthorized(_e):
       <h1>存取受限制 Access Restricted</h1>
       <p>此頁面僅供 KIRII(HK) 員工使用，非員工恕不提供服務。</p>
       <p>This page is for KIRII(HK) employees only. Access is not available to non-employees.</p>
-      <a class="btn" href="https://kirii-portfolio-1.vercel.app">返回公司入口 · Back to company portal</a>
+      <a class="btn" href="#">返回公司入口 · Back to company portal</a>
     </div>
   </body>
 </html>
@@ -1307,10 +1288,7 @@ def product_detail(product_number):
     </script>
 </body>
 </html>
-    ''', 
-    product=product,
-    number=product_number
-    )
+    ''', product=product, number=product_number)
 
 @app.route('/api/inventory')
 def api_inventory():

@@ -248,7 +248,7 @@ class KiriiInventoryPlatform:
 platform = KiriiInventoryPlatform()
 
 ALLOWED_REFERRERS = set([d.strip().lower() for d in os.getenv('ALLOWED_REFERRERS', 'kirii-portfolio-1.vercel.app').split(',') if d.strip()])
-STRICT_REFERER = os.getenv('STRICT_REFERER', '1') != '0'
+STRICT_REFERER = os.getenv('STRICT_REFERER', '0') != '0'  # デフォルトで無効化
 
 @app.before_request
 def enforce_referer_protection():
@@ -816,7 +816,7 @@ def index():
                         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                         const code = jsQR(imageData.data, imageData.width, imageData.height);
                         
-                        if (code) {
+            if (code) {
                             console.log('QRコード読み取り成功:', code.data);
                             
                             // 結果表示
@@ -831,7 +831,7 @@ def index():
                                 setTimeout(() => {
                                     window.location.href = '/product/' + code.data.trim();
                                 }, 200);
-                            } else {
+            } else {
                                 // 無効な番号の場合は2秒後に結果を非表示（短縮）
                                 setTimeout(() => {
                                     if (resultDisplay) {
@@ -883,7 +883,7 @@ def index():
                 return;
             }
             if (/^\d+$/.test(code)) {
-                window.location.href = '/product/' + code;
+            window.location.href = '/product/' + code;
                 return;
             }
             // ProductCode 形（例: BD-060, AC-019 等）はコード優先
@@ -1234,7 +1234,7 @@ def product_detail(product_number):
                 <div class="detail-item">
                     <div class="detail-label">📍 Storage Location / 儲存位置</div>
                     <div class="detail-value location-value">{{ product.location or '0' }}</div>
-                </div>
+            </div>
                 <div class="detail-item">
                     <div class="detail-label">📃 w/o DN / 有單未出</div>
                     <div class="detail-value">{{ (product.without_dn if product.without_dn is not none else '—') }}{{ (product.unit if product.without_dn is not none else '') }}</div>
@@ -1274,8 +1274,8 @@ def product_detail(product_number):
                             <div class="grid-cell storage-cell" data-location="A-6">A-6</div>
                             <div class="grid-cell empty"></div>
                             <div class="grid-cell empty"></div>
-                        </div>
-                    </div>
+                </div>
+                </div>
                 </div>
                 <div class="detail-item last-updated-item">
                     <div class="detail-label">📅 Last Updated / 最後更新</div>
@@ -1308,7 +1308,7 @@ def product_detail(product_number):
 </body>
 </html>
     ''', 
-    product=product, 
+    product=product,
     number=product_number
     )
 

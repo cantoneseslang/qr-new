@@ -1,0 +1,63 @@
+# Vercelデプロイ除外ファイル
+# 不要なファイルを除外してビルド時間を短縮
+
+# 監視システム関連（Vercelでは不要）
+cctv_streaming_fixed.py
+cctv_streaming_fixed_backup*.py
+factory_monitor.py
+web_dashboard.py
+camera_connection.py
+object_counter.py
+config.py
+test_*.py
+train_*.py
+manual_*.py
+auto_*.py
+monitor_service.ps1
+start_*.ps1
+ngrok_*.ps1
+
+# データファイル
+dataset/
+saved_frames/
+recordings/
+download/
+qr_codes/
+qr_codes_number_based/
+*.mp4
+*.jpg
+*.png
+*.pt
+*.yaml
+*.csv
+
+# ログ・PIDファイル
+*.log
+*.pid
+cctv_system.pid
+
+# バックアップファイル
+*_backup*
+*_backup_*
+
+# その他のプロジェクトフォルダ（Vercelでは不要）
+khk/
+khkmon/
+khkmonitor/
+khkmon/
+KHK-AI-DETECT-MONITOR/
+vercel_*/
+vercel_minimal/
+
+# ドキュメント（Vercelでは不要）
+*.md
+!kirii_inventory_vercel/*.md
+
+# 設定ファイル（Vercelでは不要）
+package.json
+proxy.js
+monitoring-card.jsx
+
+# その他
+cookies.txt
+ultra_simple_mapping.txt

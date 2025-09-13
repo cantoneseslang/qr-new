@@ -20,13 +20,6 @@ class KiriiInventoryPlatform:
         self.sheet_url = os.getenv('GOOGLE_SHEET_URL', 'https://docs.google.com/spreadsheets/d/1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M/edit?usp=sharing')
         self.use_google_sheets = bool(self.sheet_url)
         
-        # テスト用のローカルデータ（Googleシートと同じ構造）
-        self.fallback_inventory = {
-            1: {"code": "BD-060", "name": "泰山普通石膏板 4'x6'x12mmx 4.5mm", "quantity": 200, "updated": "2025-07-26", "location": "A-1", "category": "Merchandies", "unit": "張"},
-            2: {"code": "US0503206MM2440", "name": "Stud 50mmx32mmx0.6mmx2440mm", "quantity": 200, "updated": "2025-07-26", "location": "A-2", "category": "Products", "unit": "只"},
-            3: {"code": "AC-258", "name": "KIRII Corner Bead 2440mm (25pcs/bdl)(0.4mm 鋁)", "quantity": 50, "updated": "2025-07-26", "location": "B-1", "category": "Products", "unit": "個"},
-            4: {"code": "AC-261", "name": "黃岩綿- 60g (6pcs/pack)", "quantity": 10, "updated": "2025-07-26", "location": "C-1", "category": "MK", "unit": "包"}
-        }
         
         # Googleシート接続を初期化
         self.sheet_client = None
@@ -247,34 +240,15 @@ class KiriiInventoryPlatform:
 
 platform = KiriiInventoryPlatform()
 
-ALLOWED_REFERRERS = set([d.strip().lower() for d in os.getenv('ALLOWED_REFERRERS', 'kirii-portfolio-1.vercel.app').split(',') if d.strip()])
-STRICT_REFERER = os.getenv('STRICT_REFERER', '1') != '0'
-
+# ロゴとファビコンの例外処理のみ有効（認証チェック無効化）
 @app.before_request
-def enforce_referer_protection():
-    if not STRICT_REFERER:
+def handle_static_files():
+    # ロゴとファビコンは許可
+    if request.path.startswith('/static/logo.png') or request.path == '/favicon.ico':
         return
-    path = request.path or '/'
-    # 例外（ロゴ/ファビコン）
-    if path.startswith('/static/logo') or path == '/favicon.ico':
-        return
-    # ローカル開発は許可
-    if request.host.startswith('localhost') or request.host.startswith('127.0.0.1'):
-        return
-    referer = request.headers.get('Referer', '')
-    # リファラが無い場合は拒否
-    if not referer:
-        abort(401)
-    try:
-        ref_host = urlparse(referer).hostname or ''
-        req_host = request.host.split(':')[0].lower()
-        if ref_host.lower() == req_host:
-            return
-        if ref_host.lower() in ALLOWED_REFERRERS:
-            return
-    except Exception:
-        pass
-    abort(401)
+    
+    # 認証チェックは無効化（誰でもアクセス可能）
+    return
 
 @app.errorhandler(401)
 def handle_unauthorized(_e):
@@ -307,7 +281,7 @@ def handle_unauthorized(_e):
       <h1>存取受限制 Access Restricted</h1>
       <p>此頁面僅供 KIRII(HK) 員工使用，非員工恕不提供服務。</p>
       <p>This page is for KIRII(HK) employees only. Access is not available to non-employees.</p>
-      <a class="btn" href="https://kirii-portfolio-1.vercel.app">返回公司入口 · Back to company portal</a>
+      <a class="btn" href="#">返回公司入口 · Back to company portal</a>
     </div>
   </body>
 </html>
@@ -362,13 +336,41 @@ def index():
         s2 = re.sub(r'[^a-z0-9]+', '', s)
         return s2
 
+    # BDシリーズとFCシリーズの製品コードリスト
+    bd_series_codes = [
+        'BD-011', 'BD-024', 'BD-030', 'BD-043', 'BD-045-MN', 'BD-048-MN', 'BD-049', 
+        'BD-050-MN', 'BD-051', 'BD-052', 'BD-053', 'BD-054', 'BD-055-M', 'BD-056-M', 
+        'BD-057', 'BD-059', 'BD-060', 'BD-061', 'BD-062', 'BD-063', 'BD-064', 'BD-065', 'BD-067',
+        'FC-003', 'FC-006', 'FC-007', 'FC-008', 'FC-014', 'FC-015', 'FC-036', 'FC-041', 
+        'FC-043', 'FC-044', 'FC-046', 'FC-049', 'FC-052', 'FC-053', 'FC-055', 'FC-056', 'FC-057', 'FC-059'
+    ]
+    
+    # ACシリーズの製品コードリスト
+    ac_series_codes = [
+        'AC-260', 'AC-261', 'AC-262', 'AC-269', 'AC-270'
+    ]
+
     if cat:
         from urllib.parse import unquote
         cat_key = _canon_cat(unquote(cat))
-        inventory_data = {
-            num: item for num, item in inventory_data.items()
-            if _canon_cat(item.get('category', '')) == cat_key
-        }
+        
+        # AllBoardフィルターの特別処理
+        if cat_key == 'allboard':
+            inventory_data = {
+                num: item for num, item in inventory_data.items()
+                if item.get('code', '') in bd_series_codes
+            }
+        # Allwoolフィルターの特別処理
+        elif cat_key == 'allwool':
+            inventory_data = {
+                num: item for num, item in inventory_data.items()
+                if item.get('code', '') in ac_series_codes
+            }
+        else:
+            inventory_data = {
+                num: item for num, item in inventory_data.items()
+                if _canon_cat(item.get('category', '')) == cat_key
+            }
     
     # カテゴリ一覧（件数順）
     from collections import Counter
@@ -425,15 +427,41 @@ def index():
     # カテゴリを正規化しつつ集計（同義語・表記ゆれを束ねる）
     raw_categories = [v.get('category', '') for v in platform.get_inventory_data().values()]
     canon_counts = Counter([_canon_cat(c) for c in raw_categories if c])
+    
+    # AllBoardカテゴリの件数を計算
+    all_inventory = platform.get_inventory_data()
+    bd_count = sum(1 for item in all_inventory.values() if item.get('code', '') in bd_series_codes)
+    if bd_count > 0:
+        canon_counts['allboard'] = bd_count
+    
+    # Allwoolカテゴリの件数を計算
+    ac_count = sum(1 for item in all_inventory.values() if item.get('code', '') in ac_series_codes)
+    if ac_count > 0:
+        canon_counts['allwool'] = ac_count
+    
     # 表示用ラベル（最初に見つかったものを短縮整形して採用）
     canon_to_display = {}
     for c in raw_categories:
         k = _canon_cat(c)
         if k and k not in canon_to_display:
             canon_to_display[k] = normalize_label(c)
+    
+    # AllBoardの表示ラベルを設定
+    if bd_count > 0:
+        canon_to_display['allboard'] = 'AllBoard'
+    
+    # Allwoolの表示ラベルを設定
+    if ac_count > 0:
+        canon_to_display['allwool'] = 'Allwool'
 
     # 並び順キー: 正規化キーで判定
     def category_sort_key_canon(canon: str):
+        # AllBoardを最優先で表示
+        if canon == 'allboard':
+            return (-1, 0, 0, canon)
+        # Allwoolを次に優先で表示
+        if canon == 'allwool':
+            return (-1, 1, 0, canon)
         m = re.match(r'^(\d+)mm-([rs])$', canon)
         if m:
             return (0, int(m.group(1)), 0 if m.group(2) == 'r' else 1, canon)
@@ -597,7 +625,42 @@ def index():
             font-size: 1.3em;
             font-weight: bold;
             margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .list-title-text {
+            flex: 1;
             text-align: center;
+        }
+        
+        /* モバイル表示用 */
+        @media (max-width: 768px) {
+            .list-title {
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            .list-title-text {
+                flex: none;
+                text-align: center;
+            }
+        }
+        
+        .download-btn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.8em;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .download-btn:hover {
+            background: #218838;
         }
         /* フィルタチップ */
         .chip-bar { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px; margin: 8px 0 14px; }
@@ -678,7 +741,7 @@ def index():
 <body>
     <div class="container">
         <div class="header">
-            <img src="/static/logo" class="logo" alt="KIRII Logo">
+            <img src="/static/logo.png" class="logo" alt="KIRII Logo">
             <div>
                 <div class="header-title">STOCK-AI-SCAN</div>
             </div>
@@ -696,15 +759,26 @@ def index():
         </div>
         
         <div class="inventory-list">
-            <div class="list-title">📦 Inventory List / 庫存清單</div>
+            <div class="list-title">
+                <div class="list-title-text">📦 Inventory List / 庫存清單</div>
+                <button class="download-btn" onclick="downloadStockList()">📥 Download List/下載名單</button>
+            </div>
 
             <!-- Category chips -->
             <div class="chip-bar">
                 <a class="chip {{ 'active' if not cat else '' }}" href="/">All<span class="chip-count"></span></a>
-                {% for c in top_categories %}
-                <a class="chip {{ 'active' if cat==c else '' }}" href="/?cat={{ c | urlencode }}">{{ canon_to_display.get(c, c) }}<span class="chip-count">{{ dict(ordered_cnt).get(c, 0) }}</span></a>
-                {% endfor %}
+                {% if 'allboard' in canon_to_display %}
+                <a class="chip {{ 'active' if cat=='allboard' else '' }}" href="/?cat=allboard">{{ canon_to_display['allboard'] }}<span class="chip-count">{{ dict(ordered_cnt).get('allboard', 0) }}</span></a>
+                {% endif %}
+                {% if 'allwool' in canon_to_display %}
+                <a class="chip {{ 'active' if cat=='allwool' else '' }}" href="/?cat=allwool">{{ canon_to_display['allwool'] }}<span class="chip-count">{{ dict(ordered_cnt).get('allwool', 0) }}</span></a>
+                {% endif %}
                 <button class="more-btn" onclick="openSheet()">More</button>
+                {% for c in top_categories %}
+                {% if c != 'allboard' and c != 'allwool' %}
+                <a class="chip {{ 'active' if cat==c else '' }}" href="/?cat={{ c | urlencode }}">{{ canon_to_display.get(c, c) }}<span class="chip-count">{{ dict(ordered_cnt).get(c, 0) }}</span></a>
+                {% endif %}
+                {% endfor %}
             </div>
 
             <!-- Bottom sheet for all categories -->
@@ -713,7 +787,7 @@ def index():
                 <input id="cat-search" type="text" placeholder="Search category..." style="width:100%; padding:8px; border:1px solid #dee2e6; border-radius:8px; font-size:12px; margin-bottom:8px;">
                 <div class="grid" id="cat-grid">
                     {% for c, n in ordered_cnt %}
-                    <button data-label="{{ c }}" onclick="selectCat('{{ c | urlencode }}')">{{ normalize_label(c) }} ({{ n }})</button>
+                    <button data-label="{{ c }}" onclick="selectCat('{{ c | urlencode }}')">{{ canon_to_display.get(c, normalize_label(c)) }} ({{ n }})</button>
                     {% endfor %}
                 </div>
                 <div style="text-align:center; margin-top:8px;"><button class="more-btn" onclick="closeSheet()">Close</button></div>
@@ -816,7 +890,7 @@ def index():
                         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                         const code = jsQR(imageData.data, imageData.width, imageData.height);
                         
-                        if (code) {
+            if (code) {
                             console.log('QRコード読み取り成功:', code.data);
                             
                             // 結果表示
@@ -831,7 +905,7 @@ def index():
                                 setTimeout(() => {
                                     window.location.href = '/product/' + code.data.trim();
                                 }, 200);
-                            } else {
+            } else {
                                 // 無効な番号の場合は2秒後に結果を非表示（短縮）
                                 setTimeout(() => {
                                     if (resultDisplay) {
@@ -883,7 +957,7 @@ def index():
                 return;
             }
             if (/^\d+$/.test(code)) {
-                window.location.href = '/product/' + code;
+            window.location.href = '/product/' + code;
                 return;
             }
             // ProductCode 形（例: BD-060, AC-019 等）はコード優先
@@ -904,6 +978,28 @@ def index():
                 searchProduct();
             }
         });
+        // Download stock list function
+        function downloadStockList() {
+            // Create CSV content with BOM for proper UTF-8 encoding
+            let csvContent = "\\uFEFFNumber,3個字,Product Code,Product Short Description,Category-2,Category-3,Category-4,Stock\\n";
+            
+            // Add data from inventory
+            {% for number, product in inventory_data.items() %}
+            csvContent += "{{ number }},{{ product.code.split('-')[0] if '-' in product.code else '' }},{{ product.code }},{{ product.name | replace('"', '""') }},{{ product.category or '' }},{{ 'Merchandises' if 'merchandises' in ((product.category or '')|lower) else product.category or '' }},{{ product.category or '' }},{{ product.location or '0' }}\\n";
+            {% endfor %}
+            
+            // Create and download file with UTF-8 BOM
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'stock_list.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+        
         // Category sheet controls
         function openSheet(){ document.getElementById('cat-sheet').classList.add('open'); }
         function closeSheet(){ document.getElementById('cat-sheet').classList.remove('open'); }
@@ -1218,7 +1314,7 @@ def product_detail(product_number):
 <body>
     <div class="container">
         <div class="header">
-            <img src="/static/logo" class="logo" alt="KIRII Logo">
+            <img src="/static/logo.png" class="logo" alt="KIRII Logo">
             <button class="back-button" onclick="window.location.href='/?scan=active'">← Back / 返回</button>
         </div>
         
@@ -1234,7 +1330,7 @@ def product_detail(product_number):
                 <div class="detail-item">
                     <div class="detail-label">📍 Storage Location / 儲存位置</div>
                     <div class="detail-value location-value">{{ product.location or '0' }}</div>
-                </div>
+            </div>
                 <div class="detail-item">
                     <div class="detail-label">📃 w/o DN / 有單未出</div>
                     <div class="detail-value">{{ (product.without_dn if product.without_dn is not none else '—') }}{{ (product.unit if product.without_dn is not none else '') }}</div>
@@ -1274,8 +1370,8 @@ def product_detail(product_number):
                             <div class="grid-cell storage-cell" data-location="A-6">A-6</div>
                             <div class="grid-cell empty"></div>
                             <div class="grid-cell empty"></div>
-                        </div>
-                    </div>
+                </div>
+                </div>
                 </div>
                 <div class="detail-item last-updated-item">
                     <div class="detail-label">📅 Last Updated / 最後更新</div>
@@ -1307,10 +1403,7 @@ def product_detail(product_number):
     </script>
 </body>
 </html>
-    ''', 
-    product=product, 
-    number=product_number
-    )
+    ''', product=product, number=product_number)
 
 @app.route('/api/inventory')
 def api_inventory():
@@ -1397,37 +1490,20 @@ def product_detail_by_code(product_code):
     </div>
     ''', code=display_code), 404
 
-@app.route('/static/logo')
-def get_logo():
-    """KIRIIロゴを提供"""
-    try:
-        # Base64データファイルから読み込み
-        if os.path.exists('logo_base64.txt'):
-            with open('logo_base64.txt', 'r') as f:
-                base64_data = f.read().strip()
-            
-            # data:image/png;base64, の部分を除去してBase64データのみ取得
-            if base64_data.startswith('data:image/png;base64,'):
-                base64_data = base64_data.replace('data:image/png;base64,', '')
-            
-            import base64
-            logo_data = base64.b64decode(base64_data)
-            return logo_data, 200, {'Content-Type': 'image/png'}
-    except Exception as e:
-        print(f"Base64ロゴ読み込みエラー: {e}")
+# 静的ファイル /static/logo.png として配信
+# @app.route('/static/logo')
+# def get_logo():
+    """KIRIIロゴを提供 - Base64で直接埋め込み"""
+    # KIRIIロゴのBase64データ（直接埋め込み）
+    logo_base64 = "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"
     
     try:
-        # Base64ファイルが見つからない場合は、PNGファイルを試す
-        if os.path.exists('KIRII-logo-3.png'):
-            with open('KIRII-logo-3.png', 'rb') as f:
-                logo_data = f.read()
-            return logo_data, 200, {'Content-Type': 'image/png'}
+        import base64
+        logo_data = base64.b64decode(logo_base64)
+        return logo_data, 200, {'Content-Type': 'image/png'}
     except Exception as e:
-        print(f"PNGロゴ読み込みエラー: {e}")
-    
-    # どちらも見つからない場合は、デフォルトのテキストロゴを返す
-    print("ロゴファイルが見つかりません。テキストロゴを使用します。")
-    return "KIRII", 200, {'Content-Type': 'text/plain'}
+        print(f"ロゴ読み込みエラー: {e}")
+        return "KIRII", 200, {'Content-Type': 'text/plain'}
 
 if __name__ == '__main__':
     print("🏭 KIRII在庫管理Vercelプラットフォーム起動")

@@ -4,7 +4,7 @@
 - **プロジェクト名**: qr-new
 - **Vercel URL**: https://vercel.com/kirii/qr-new
 - **プロジェクトID**: prj_Z7anXpADDUgRpDlTEyStAQvWlH5N
-- **本番URL**: https://qr-nb45nbhzi-kirii.vercel.app
+- **本番URL**: https://qr-new-six.vercel.app
 - **GitHubリポジトリ**: https://github.com/cantoneseslang/qr-new.git
 
 ## 使用ファイル構成
@@ -40,7 +40,7 @@
 cd E:\factory_monitoring_system\kirii_inventory_vercel
 python app.py
 ```
-- アクセス: http://localhost:5000
+- アクセス: http://localhost:5001
 
 ### Vercelデプロイ
 ```bash

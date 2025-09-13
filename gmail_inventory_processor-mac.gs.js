@@ -1,6 +1,7 @@
 /**
  * Gmail Inventory PDF Processor with Gemini AI
  * Gmailから「inventory」件名のメールを検索し、添付PDFをGemini 2.5で要約してGoogle Sheetsに保存
+ * 指定時間（8:05、13:05、18:17）でGmailをチェックし、条件に合致するメールがあった場合にスクリプトを実行
  */
 
 // 設定定数
@@ -10,263 +11,512 @@ const CONFIG = {
   SHEET_ID: '1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M',
   GMAIL_ADDRESS: 'bestinksalesman@gmail.com',
   INVENTORY_SUMMARY_SHEET_NAME: 'InventorySummaryReport',
-  SEARCH_QUERY: 'subject:inventory has:attachment filename:inventory.pdf'
+  SEARCH_QUERY: 'subject:inventory has:attachment filename:inventory.pdf',
+  // 指定チェック時間（24時間形式）
+  CHECK_TIMES: ['08:05', '13:05', '18:17'],
+  // メール条件（件名に含まれるキーワード）
+  EMAIL_CONDITIONS: ['inventory', 'stock', '在庫', 'データ'],
+  // 再トライ設定
+  RETRY_DELAY_MINUTES: 3, // 再トライまでの待機時間（分）
+  MAX_RETRY_ATTEMPTS: 2,  // 最大再トライ回数
+  RETRY_TRIGGER_FUNCTION: 'retryMain' // 再トライ用関数名
 };
 
 /**
  * メイン実行関数（トリガー用）
  */
 function main() {
-  processInventoryEmails();
-  setStockFormulas();
+  let processedEmail = null;
+  try {
+    console.log('=== メイン処理開始 ===');
+    
+    // 時間チェック機能を実行
+    if (!checkScheduledTime()) {
+      console.log('指定時間外のため、処理をスキップします');
+      return;
+    }
+    
+    // メール条件チェック機能を実行
+    const emails = searchInventoryEmails();
+    if (emails.length === 0) {
+      console.log('条件に合致するメールがないため、3分後に再トライをスケジュールします');
+      sendNoEmailNotification();
+      scheduleRetry();
+      return;
+    }
+    
+    // メールが見つかった場合のみ処理を実行
+    console.log('条件に合致するメールが見つかりました。在庫データ処理を開始します');
+    processedEmail = processInventoryEmailsWithEmails(emails);
+    console.log('=== 在庫メール処理完了、Stock式設定開始 ===');
+    setStockFormulas();
+    console.log('=== メイン処理完了 ===');
+    
+    // 作業終了お知らせメールを送信
+    console.log('=== 作業終了メール送信開始 ===');
+    console.log(`処理したメール: ${processedEmail ? 'あり' : 'なし'}`);
+    sendCompletionNotification(processedEmail);
+    console.log('=== 作業終了メール送信完了 ===');
+  } catch (error) {
+    console.error('メイン処理でエラーが発生しました:', error);
+    sendErrorNotification(error);
+    throw error;
+  }
 }
 
 /**
- * 在庫メール処理関数
+ * 再トライ用メイン関数
+ */
+function retryMain() {
+  let processedEmail = null;
+  try {
+    console.log('=== 再トライ処理開始 ===');
+    
+    // 再トライ回数をチェック
+    const retryCount = getRetryCount();
+    if (retryCount >= CONFIG.MAX_RETRY_ATTEMPTS) {
+      console.log(`最大再トライ回数（${CONFIG.MAX_RETRY_ATTEMPTS}回）に達したため、処理を終了します`);
+      sendRetryLimitNotification();
+      return;
+    }
+    
+    console.log(`再トライ回数: ${retryCount + 1}/${CONFIG.MAX_RETRY_ATTEMPTS}`);
+    
+    // 時間チェック機能を実行
+    if (!checkScheduledTime()) {
+      console.log('再トライ時も指定時間外のため、処理をスキップします');
+      return;
+    }
+    
+    // メール条件チェック機能を実行
+    const emails = searchInventoryEmails();
+    if (emails.length === 0) {
+      console.log('再トライ時も条件に合致するメールがないため、3分後に再トライをスケジュールします');
+      incrementRetryCount();
+      sendNoEmailNotification();
+      scheduleRetry();
+      return;
+    }
+    
+    // 再トライ成功時はカウンターをリセット
+    resetRetryCount();
+    
+    // メールが見つかった場合のみ処理を実行
+    console.log('再トライで条件に合致するメールが見つかりました。在庫データ処理を開始します');
+    processedEmail = processInventoryEmailsWithEmails(emails);
+    console.log('=== 在庫メール処理完了、Stock式設定開始 ===');
+    setStockFormulas();
+    console.log('=== 再トライ処理完了 ===');
+    
+    // 作業終了お知らせメールを送信
+    console.log('=== 作業終了メール送信開始 ===');
+    console.log(`処理したメール: ${processedEmail ? 'あり' : 'なし'}`);
+    sendCompletionNotification(processedEmail);
+    console.log('=== 作業終了メール送信完了 ===');
+  } catch (error) {
+    console.error('再トライ処理でエラーが発生しました:', error);
+    sendErrorNotification(error);
+    throw error;
+  }
+}
+
+/**
+ * 在庫メール処理関数（メール配列を受け取る版）
+ */
+function processInventoryEmailsWithEmails(emails) {
+  try {
+    console.log('=== Gmail Inventory Processor 開始 ===');
+    console.log(`検索結果: ${emails.length}件のメールが見つかりました`);
+
+    if (emails.length === 0) {
+      console.log('処理対象メールはありませんでした。');
+      return null;
+    }
+    
+    console.log(`本日のメール ${emails.length}件の処理を開始します。`);
+    
+    // 最新のメールのみを処理（重複を避けるため）
+    const latestEmail = emails[0]; // 既に新しい順にソート済み
+    const emailDate = latestEmail.getDate();
+    const emailDateHK = new Date(emailDate.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+    const emailDateStr = emailDateHK.toLocaleDateString('ja-JP');
+    const emailTimeStr = emailDateHK.toLocaleTimeString('ja-JP', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    const mailInfo = `メール (件名: ${latestEmail.getSubject()}, 日時: ${emailDateStr} ${emailTimeStr})`;
+    
+    try {
+      const startTime = new Date();
+      console.log(`${mailInfo} - 処理開始: ${startTime.toLocaleString('ja-JP')}`);
+      
+      const pdfBlob = getPdfAttachment(latestEmail);
+      if (!pdfBlob) {
+        console.log(`${mailInfo} - PDF添付ファイルが見つかりませんでした。処理を終了します。`);
+        return null;
+      }
+      
+      console.log(`${mailInfo} - GeminiでPDF直接解析を開始します...`);
+      const geminiStartTime = new Date();
+      const summary = generateSummaryWithGeminiMultiplePasses(pdfBlob, 1); 
+      const geminiEndTime = new Date();
+      const geminiDuration = Math.round((geminiEndTime - geminiStartTime) / 1000);
+      console.log(`${mailInfo} - Gemini解析完了 (処理時間: ${geminiDuration}秒)`);
+      
+      saveToGoogleSheets(summary, latestEmail, 1);
+      console.log(`${mailInfo} - Google Sheetsへの保存が完了しました。`);
+      
+      const endTime = new Date();
+      const totalDuration = Math.round((endTime - startTime) / 1000);
+      console.log(`${mailInfo} - 処理完了 (総処理時間: ${totalDuration}秒)`);
+      
+      return latestEmail; // 処理したメールを返す
+      
+    } catch (error) {
+      console.error(`${mailInfo} - 処理中にエラーが発生しました:`, error.message);
+      throw error;
+    }
+    
+    console.log('=== Gmail Inventory Processor 正常終了 ===');
+  } catch (error) {
+    console.error('スクリプト全体で致命的なエラーが発生しました:', error);
+    sendErrorNotification(error);
+    throw error; // エラーを上位に伝播
+  }
+}
+
+/**
+ * 在庫メール処理関数（従来版）
  */
 function processInventoryEmails() {
   try {
     console.log('=== Gmail Inventory Processor 開始 ===');
 
+    // メールを検索
     const emails = searchInventoryEmails();
     console.log(`検索結果: ${emails.length}件のメールが見つかりました`);
 
     if (emails.length === 0) {
-      console.log('本日の処理対象メールはありませんでした。');
-      return;
+      console.log('処理対象メールはありませんでした。');
+      return null;
     }
     
     console.log(`本日のメール ${emails.length}件の処理を開始します。`);
     
-    let processedCount = 0;
-    for (let i = 0; i < emails.length; i++) {
-      const email = emails[i];
-      const mailInfo = `メール ${i + 1}/${emails.length} (件名: ${email.getSubject()})`;
+    // 最新のメールのみを処理（重複を避けるため）
+    const latestEmail = emails[0]; // 既に新しい順にソート済み
+    const mailInfo = `メール (件名: ${latestEmail.getSubject()})`;
+    
+    try {
+      const startTime = new Date();
+      console.log(`${mailInfo} - 処理開始: ${startTime.toLocaleString('ja-JP')}`);
       
-      try {
-        const startTime = new Date();
-        console.log(`${mailInfo} - 処理開始: ${startTime.toLocaleString('ja-JP')}`);
-        
-        const pdfBlob = getPdfAttachment(email);
-        if (!pdfBlob) {
-          console.log(`${mailInfo} - PDF添付ファイルが見つかりませんでした。スキップします。`);
-          continue;
-        }
-        
-        console.log(`${mailInfo} - GeminiでPDF直接解析を開始します...`);
-        const geminiStartTime = new Date();
-        const summary = generateSummaryWithGeminiMultiplePasses(pdfBlob, i + 1); 
-        const geminiEndTime = new Date();
-        const geminiDuration = Math.round((geminiEndTime - geminiStartTime) / 1000);
-        console.log(`${mailInfo} - Gemini解析完了 (処理時間: ${geminiDuration}秒)`);
-        
-        saveToGoogleSheets(summary, email, i + 1);
-        console.log(`${mailInfo} - Google Sheetsへの保存が完了しました。`);
-        
-        const endTime = new Date();
-        const totalDuration = Math.round((endTime - startTime) / 1000);
-        console.log(`${mailInfo} - 処理完了 (総処理時間: ${totalDuration}秒)`);
-        
-        processedCount++;
-        
-        if (i < emails.length - 1) {
-          console.log(`APIの連続呼び出しを避けるため5秒間待機します...`);
-          Utilities.sleep(5000);
-        }
-        
-      } catch (error) {
-        console.error(`${mailInfo} - 処理中にエラーが発生しました:`, error.message);
-        continue;
+      const pdfBlob = getPdfAttachment(latestEmail);
+      if (!pdfBlob) {
+        console.log(`${mailInfo} - PDF添付ファイルが見つかりませんでした。処理を終了します。`);
+        return null;
       }
+      
+      console.log(`${mailInfo} - GeminiでPDF直接解析を開始します...`);
+      const geminiStartTime = new Date();
+      const summary = generateSummaryWithGeminiMultiplePasses(pdfBlob, 1); 
+      const geminiEndTime = new Date();
+      const geminiDuration = Math.round((geminiEndTime - geminiStartTime) / 1000);
+      console.log(`${mailInfo} - Gemini解析完了 (処理時間: ${geminiDuration}秒)`);
+      
+      saveToGoogleSheets(summary, latestEmail, 1);
+      console.log(`${mailInfo} - Google Sheetsへの保存が完了しました。`);
+      
+      const endTime = new Date();
+      const totalDuration = Math.round((endTime - startTime) / 1000);
+      console.log(`${mailInfo} - 処理完了 (総処理時間: ${totalDuration}秒)`);
+      
+      return latestEmail; // 処理したメールを返す
+      
+    } catch (error) {
+      console.error(`${mailInfo} - 処理中にエラーが発生しました:`, error.message);
+      throw error;
     }
     
-    console.log(`処理完了: ${processedCount}/${emails.length}件のメールを処理しました。`);
     console.log('=== Gmail Inventory Processor 正常終了 ===');
   } catch (error) {
     console.error('スクリプト全体で致命的なエラーが発生しました:', error);
     sendErrorNotification(error);
+    throw error; // エラーを上位に伝播
   }
 }
+
+// ===============================================================
+// 再トライ機能
+// ===============================================================
+
+/**
+ * 再トライをスケジュールします（3分後）
+ */
+function scheduleRetry() {
+  try {
+    console.log(`${CONFIG.RETRY_DELAY_MINUTES}分後に再トライをスケジュールします`);
+    
+    // 既存の再トライトリガーを削除
+    const triggers = ScriptApp.getProjectTriggers();
+    for (const trigger of triggers) {
+      if (trigger.getHandlerFunction() === CONFIG.RETRY_TRIGGER_FUNCTION) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    }
+    
+    // 3分後に再トライトリガーを設定
+    const retryTime = new Date();
+    retryTime.setMinutes(retryTime.getMinutes() + CONFIG.RETRY_DELAY_MINUTES);
+    
+    ScriptApp.newTrigger(CONFIG.RETRY_TRIGGER_FUNCTION)
+      .timeBased()
+      .at(retryTime)
+      .create();
+    
+    console.log(`再トライスケジュール完了: ${retryTime.toLocaleString('ja-JP')}`);
+    
+  } catch (error) {
+    console.error('再トライスケジュールエラー:', error);
+  }
+}
+
+/**
+ * 再トライ回数を取得します
+ */
+function getRetryCount() {
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const retryCount = properties.getProperty('retryCount');
+    return retryCount ? parseInt(retryCount, 10) : 0;
+  } catch (error) {
+    console.error('再トライ回数取得エラー:', error);
+    return 0;
+  }
+}
+
+/**
+ * 再トライ回数を増加させます
+ */
+function incrementRetryCount() {
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const currentCount = getRetryCount();
+    const newCount = currentCount + 1;
+    properties.setProperty('retryCount', newCount.toString());
+    console.log(`再トライ回数を更新: ${newCount}`);
+  } catch (error) {
+    console.error('再トライ回数更新エラー:', error);
+  }
+}
+
+/**
+ * 再トライ回数をリセットします
+ */
+function resetRetryCount() {
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    properties.deleteProperty('retryCount');
+    console.log('再トライ回数をリセットしました');
+  } catch (error) {
+    console.error('再トライ回数リセットエラー:', error);
+  }
+}
+
+/**
+ * メール無しの時の通知メールを送信します
+ */
+function sendNoEmailNotification() {
+  try {
+    const now = new Date();
+    const hongKongTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+    const notificationTime = hongKongTime.toLocaleString('ja-JP');
+    
+    const subject = 'GASスクリプト「gmail-Inventory-AutoDataFill」メール未発見通知';
+    const body = `
+在庫データ処理スクリプトを実行しましたが、条件に合致するメールが見当たりませんでした。
+
+通知時刻: ${notificationTime}
+指定チェック時間: ${CONFIG.CHECK_TIMES.join(', ')}
+検索条件: ${CONFIG.EMAIL_CONDITIONS.join(', ')}
+
+3分後に再度トライします。
+メールが到着次第、自動的に処理を実行します。
+
+処理完了時には改めて完了通知メールをお送りします。
+`;
+
+    GmailApp.sendEmail(
+      CONFIG.GMAIL_ADDRESS,
+      subject,
+      body
+    );
+    
+    console.log('✅ メール未発見通知メールを送信しました');
+  } catch (error) {
+    console.error('メール未発見通知メールの送信に失敗しました:', error);
+  }
+}
+
+/**
+ * 再トライ制限通知メールを送信します
+ */
+function sendRetryLimitNotification() {
+  try {
+    const now = new Date();
+    const hongKongTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+    const notificationTime = hongKongTime.toLocaleString('ja-JP');
+    
+    const subject = '【要確認】GASスクリプト再トライ制限到達通知';
+    const body = `
+Gmail在庫PDF処理スクリプトで最大再トライ回数に達しました。
+
+通知時刻: ${notificationTime}
+最大再トライ回数: ${CONFIG.MAX_RETRY_ATTEMPTS}回
+再トライ間隔: ${CONFIG.RETRY_DELAY_MINUTES}分
+
+指定時間（${CONFIG.CHECK_TIMES.join(', ')}）に条件に合致するメールが見つからなかったため、
+処理を終了しました。
+
+手動でスクリプトを実行するか、メールの送信状況を確認してください。
+`;
+
+    GmailApp.sendEmail(
+      CONFIG.GMAIL_ADDRESS,
+      subject,
+      body
+    );
+    
+    console.log('✅ 再トライ制限通知メールを送信しました');
+  } catch (error) {
+    console.error('再トライ制限通知メールの送信に失敗しました:', error);
+  }
+}
+
+// ===============================================================
+// 時間チェック・条件チェック機能
+// ===============================================================
+
+/**
+ * 指定時間（8:05、13:05、18:17）かどうかをチェックします
+ * @return {boolean} 指定時間内の場合true、そうでなければfalse
+ */
+function checkScheduledTime() {
+  try {
+    const now = new Date();
+    const hongKongTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+    const currentTime = hongKongTime.toLocaleTimeString('ja-JP', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    
+    // 曜日チェック（日曜日は処理しない）
+    const dayOfWeek = hongKongTime.getDay(); // 0=日曜日, 1=月曜日, ..., 6=土曜日
+    if (dayOfWeek === 0) {
+      console.log('❌ 日曜日のため、処理をスキップします');
+      return false;
+    }
+    
+    console.log(`現在の香港時間: ${currentTime}`);
+    console.log(`指定チェック時間: ${CONFIG.CHECK_TIMES.join(', ')}`);
+    
+    // 指定時間内かチェック（±60分の許容範囲 - 手動テスト用）
+    for (const checkTime of CONFIG.CHECK_TIMES) {
+      if (isWithinTimeRange(currentTime, checkTime, 60)) {
+        console.log(`✅ 指定時間内です: ${checkTime} (±60分許容)`);
+        return true;
+      }
+    }
+    
+    console.log(`❌ 指定時間外です: ${currentTime}`);
+    return false;
+    
+  } catch (error) {
+    console.error('時間チェックエラー:', error);
+    // エラー時は処理を続行（安全側に倒す）
+    return true;
+  }
+}
+
+/**
+ * 現在時刻が指定時刻の範囲内かチェックします
+ * @param {string} currentTime - 現在時刻 (HH:MM形式)
+ * @param {string} targetTime - 対象時刻 (HH:MM形式)
+ * @param {number} toleranceMinutes - 許容範囲（分）
+ * @return {boolean} 範囲内の場合true
+ */
+function isWithinTimeRange(currentTime, targetTime, toleranceMinutes = 5) {
+  try {
+    const [currentHour, currentMinute] = currentTime.split(':').map(Number);
+    const [targetHour, targetMinute] = targetTime.split(':').map(Number);
+    
+    const currentTotalMinutes = currentHour * 60 + currentMinute;
+    const targetTotalMinutes = targetHour * 60 + targetMinute;
+    
+    const diffMinutes = Math.abs(currentTotalMinutes - targetTotalMinutes);
+    
+    return diffMinutes <= toleranceMinutes;
+  } catch (error) {
+    console.error('時間範囲チェックエラー:', error);
+    return false;
+  }
+}
+
 
 // ===============================================================
 // ヘルパー関数
 // ===============================================================
 
 /**
- * 複数回に分けてPDFを解析し、すべての在庫データを取得します。
+ * PDFを1回で解析し、すべての在庫データを取得します。
  * @param {GoogleAppsScript.Base.Blob} pdfBlob - 解析するPDFファイル。
  * @param {number} emailIndex - 処理中のメール番号。
  * @return {string} すべての在庫データを統合したテキスト。
  */
 function generateSummaryWithGeminiMultiplePasses(pdfBlob, emailIndex = 1) {
   try {
-    console.log(`複数回処理開始 - ファイル名: ${pdfBlob.getName()}, サイズ: ${pdfBlob.getBytes().length} bytes`);
+    console.log(`PDF解析開始 - ファイル名: ${pdfBlob.getName()}, サイズ: ${pdfBlob.getBytes().length} bytes`);
     
-    const allResults = [];
-    const maxPasses = 3; // 3回処理で効率化
-    
-    for (let pass = 1; pass <= maxPasses; pass++) {
-      console.log(`=== 処理パス ${pass}/${maxPasses} 開始 ===`);
-      
-      let pageInstruction = '';
-      if (pass === 1) {
-        pageInstruction = 'PDFの1-3ページ目を詳細に解析してください。';
-      } else if (pass === 2) {
-        pageInstruction = 'PDFの4-6ページ目を詳細に解析してください。';
-      } else {
-        pageInstruction = 'PDFの7ページ目以降のすべてのページを詳細に解析してください。';
-      }
-      
-      const prompt = `
+    const prompt = `
 添付された在庫PDFファイルを解析し、製品アイテムをマークダウン形式のテーブルとして抽出してください。
 
 # 重要指示
 - テーブルのヘッダーは「Product Code, Description, On Hand, Quantity SC w/o DN, Available」とすること。
 - 表形式のデータのみを抽出し、それ以外のテキストは含めないこと。
 - 最終的な出力はマークダウンのテーブルのみとし、前後の説明文は一切不要です。
-- 指定されたページ範囲のすべての在庫アイテムを漏れなく抽出してください。
+- すべてのページの在庫アイテムを漏れなく抽出してください。
 - 商品コードが不完全でも、数値データがあれば抽出してください。
-
-${pageInstruction}
 
 以下の商品コードパターンを含むすべてのアイテムを抽出してください：
 - TNIA, TNIC, TNIL, TNIW, TNMA, TNMC で始まるコード
 - UU で始まるコード  
 - V で始まるコード
+- AC-, BD-, FC-, SW-, GSY, GHC, GHW, GSC, GSW で始まるコード
 - その他すべての商品コード
 
 各ページを隅から隅まで確認し、見落としがないようにしてください。
 `;
 
-      const result = generateSummaryWithGeminiSinglePass(pdfBlob, prompt, pass);
-      
-      if (result && result.trim().length > 0) {
-        allResults.push(result);
-        console.log(`パス ${pass} 完了: ${result.split('\n').filter(line => line.includes('|')).length}行`);
-      } else {
-        console.log(`パス ${pass} でデータなし`);
-      }
-      
-      // パス間で少し待機
-      if (pass < maxPasses) {
-        console.log('次のパスまで5秒待機...');
-        Utilities.sleep(5000);
-      }
+    const result = generateSummaryWithGeminiSinglePass(pdfBlob, prompt, 1);
+    
+    if (!result || result.trim().length === 0) {
+      console.log('解析結果が空です');
+      return '';
     }
     
-    // 結果を統合
-    const combinedResult = allResults.join('\n');
-    console.log(`統合前の総行数: ${combinedResult.split('\n').filter(line => line.includes('|')).length}行`);
-    
-    // より包括的な商品コードパターンチェック
-    const codePatterns = [
-      'TNIA', 'TNIC', 'TNIL', 'TNIW', 'TNMA', 'TNMC',
-      'UU', 'V', 'AC-', 'BD-', 'FC-', 'SW-', 'GSY', 'GHC', 'GHW', 'GSC', 'GSW'
-    ];
-    
-    // GSYパターンの詳細チェック
-    const gsyPatterns = ['GSY001', 'GSY002', 'GSY003', 'GSY004', 'GSY008', 'GSY010', 'GSY011', 'GSY014', 'GSY015', 'GSY026', 'GSY031'];
-    const foundGsyCodes = [];
-    for (const code of gsyPatterns) {
-      if (combinedResult.includes(code)) {
-        foundGsyCodes.push(code);
-      }
-    }
-    console.log(`GSY詳細チェック: ${foundGsyCodes.length}/${gsyPatterns.length}件発見`);
-    if (foundGsyCodes.length > 0) {
-      console.log(`発見されたGSYコード: ${foundGsyCodes.join(', ')}`);
-    }
-    
-    const foundPatterns = [];
-    const totalLines = combinedResult.split('\n').filter(line => line.includes('|') && !line.includes('---'));
-    
-    for (const pattern of codePatterns) {
-      const matchingLines = totalLines.filter(line => line.includes(pattern));
-      if (matchingLines.length > 0) {
-        foundPatterns.push(`${pattern}: ${matchingLines.length}件`);
-      }
-    }
-    
-    console.log(`商品コードパターン別抽出結果:`);
-    foundPatterns.forEach(pattern => console.log(`  ${pattern}`));
-    console.log(`総抽出行数: ${totalLines.length}行`);
-    
-    // 特定の商品コードが含まれているかチェック
-    const specificCodes = [
-      'TNIA243210800MK', 'TNIC242510200MK', 'TNIC242510400MK', 
-      'TNIL202510800MK', 'TNIL202511000MK', 'TNIW202011000NI',
-      'TNMA2432M2400MK', 'TNMA2432M3000MK', 'UU0381512.506MM3050',
-      'UU0703220MM2440', 'V0503208MM3000R', 'V0505008MM3150S'
-    ];
-    
-    const foundCodes = [];
-    const missingCodesFound = [];
-    
-    for (const code of specificCodes) {
-      if (combinedResult.includes(code)) {
-        foundCodes.push(code);
-      } else {
-        missingCodesFound.push(code);
-      }
-    }
-    
-    console.log(`特定商品コード検出: ${foundCodes.length}/${specificCodes.length}件`);
-    if (foundCodes.length > 0) {
-      console.log(`発見されたコード: ${foundCodes.join(', ')}`);
-    }
-    if (missingCodesFound.length > 0) {
-      console.log(`見つからないコード: ${missingCodesFound.join(', ')}`);
-    }
-    
-    // GSYパターンが0件の場合、追加処理を実行
-    const gsyCount = combinedResult.split('\n').filter(line => line.includes('GSY')).length;
-    if (gsyCount === 0) {
-      console.log('GSYパターンが検出されませんでした。追加処理を実行します...');
-      
-      const additionalPrompt = `
-添付された在庫PDFファイルを解析し、GSYで始まる製品アイテムをマークダウン形式のテーブルとして抽出してください。
-
-# 重要指示
-- テーブルのヘッダーは「Product Code, Description, On Hand, Quantity SC w/o DN, Available」とすること。
-- GSYで始まるすべての商品コードを探してください（GSY001, GSY002, GSY003, ..., GSY031など）。
-- 特に以下の商品コードを必ず見つけてください：GSY026, GSY031
-- 表形式のデータのみを抽出し、それ以外のテキストは含めないこと。
-- 最終的な出力はマークダウンのテーブルのみとし、前後の説明文は一切不要です。
-
-PDFの最後のページや、Ceiling System関連のセクションを重点的に確認してください。
-`;
-      
-      try {
-        const additionalResult = generateSummaryWithGeminiSinglePass(pdfBlob, additionalPrompt, 99);
-        if (additionalResult && additionalResult.trim().length > 0) {
-          console.log(`追加処理でGSYデータを発見: ${additionalResult.split('\n').filter(line => line.includes('|')).length}行`);
-          allResults.push(additionalResult);
-          
-          // 結果を再統合
-          const updatedCombinedResult = allResults.join('\n');
-          console.log(`更新後の総行数: ${updatedCombinedResult.split('\n').filter(line => line.includes('|')).length}行`);
-          
-          // 重複除去を実行
-          const deduplicatedResult = removeDuplicateInventoryItems(updatedCombinedResult);
-          const finalLines = deduplicatedResult.split('\n').filter(line => line.includes('|') && !line.includes('---'));
-          console.log(`重複除去後の総行数: ${finalLines.length}行`);
-          
-          return deduplicatedResult;
-        }
-      } catch (error) {
-        console.error('追加処理エラー:', error);
-      }
-    }
+    console.log(`解析完了: ${result.split('\n').filter(line => line.includes('|')).length}行`);
     
     // 重複除去を実行
-    const deduplicatedResult = removeDuplicateInventoryItems(combinedResult);
+    const deduplicatedResult = removeDuplicateInventoryItems(result);
     const finalLines = deduplicatedResult.split('\n').filter(line => line.includes('|') && !line.includes('---'));
     console.log(`重複除去後の総行数: ${finalLines.length}行`);
     
     return deduplicatedResult;
     
   } catch (error) {
-    console.error('複数回処理エラー:', error);
+    console.error('PDF解析エラー:', error);
     // フォールバック: 単一回処理
     return generateSummaryWithGeminiSinglePass(pdfBlob, `
 添付された在庫PDFファイルを解析し、すべての製品アイテムをマークダウン形式のテーブルとして抽出してください。
@@ -356,34 +606,63 @@ function generateSummaryWithGeminiSinglePass(pdfBlob, prompt, passNumber = 1) {
 }
 
 /**
- * 香港時間で今日のメールを検索します。
+ * 指定時間の±1時間以内のメールを検索します。
  */
 function searchInventoryEmails() {
   try {
-    // 現在の香港時間を取得
+    // 現在時刻を取得（香港時間）
     const now = new Date();
-    const hongKongTime = new Date(now.getTime() + (8 * 60 * 60 * 1000)); // UTC+8
-    console.log(`香港時間の今日: ${hongKongTime.getFullYear()}/${hongKongTime.getMonth() + 1}/${hongKongTime.getDate()} ${hongKongTime.getHours()}:${hongKongTime.getMinutes()}:${hongKongTime.getSeconds()}`);
+    const hongKongTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+    const currentTime = hongKongTime.toLocaleTimeString('ja-JP', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
     
-    // より簡単な日付計算（香港時間の今日の0時と23時59分をUTCに変換）
-    const hkYear = hongKongTime.getUTCFullYear();
-    const hkMonth = hongKongTime.getUTCMonth();
-    const hkDate = hongKongTime.getUTCDate();
+    console.log(`現在の香港時間: ${currentTime}`);
     
-    const todayStart = new Date(Date.UTC(hkYear, hkMonth, hkDate, 0, 0, 0) - (8 * 60 * 60 * 1000));
-    const todayEnd = new Date(Date.UTC(hkYear, hkMonth, hkDate, 23, 59, 59) - (8 * 60 * 60 * 1000));
+    // 現在時刻に最も近い指定時間を特定（手動テスト用に±60分許容）
+    let targetTime = null;
+    for (const checkTime of CONFIG.CHECK_TIMES) {
+      if (isWithinTimeRange(currentTime, checkTime, 60)) {
+        targetTime = checkTime;
+        break;
+      }
+    }
     
-    console.log(`検索範囲（UTC）: ${todayStart.toISOString()} ～ ${todayEnd.toISOString()}`);
-    console.log(`検索範囲（香港時間）: ${new Date(todayStart.getTime() + (8 * 60 * 60 * 1000)).toLocaleString('ja-JP')} ～ ${new Date(todayEnd.getTime() + (8 * 60 * 60 * 1000)).toLocaleString('ja-JP')}`);
-
-    // より柔軟な検索クエリ
+    if (!targetTime) {
+      console.log('指定時間の±60分範囲外のため、メール検索をスキップします');
+      return [];
+    }
+    
+    console.log(`対象時間: ${targetTime} (±1時間以内のメールを検索)`);
+    
+    // 検索時間範囲を計算（±1時間）
+    const [targetHour, targetMinute] = targetTime.split(':').map(Number);
+    const targetTotalMinutes = targetHour * 60 + targetMinute;
+    
+    const startMinutes = targetTotalMinutes - 60; // 1時間前
+    const endMinutes = targetTotalMinutes + 60;   // 1時間後
+    
+    const startHour = Math.floor(startMinutes / 60);
+    const startMin = startMinutes % 60;
+    const endHour = Math.floor(endMinutes / 60);
+    const endMin = endMinutes % 60;
+    
+    console.log(`検索時間範囲: ${String(startHour).padStart(2, '0')}:${String(startMin).padStart(2, '0')} - ${String(endHour).padStart(2, '0')}:${String(endMin).padStart(2, '0')}`);
+    
+    // 複数の検索クエリでメールを検索（効率化のため、該当メールが見つかったら早期終了）
     const searchQueries = [
-      `${CONFIG.SEARCH_QUERY} after:${formatDateForGmail(todayStart)} before:${formatDateForGmail(todayEnd)}`,
-      `subject:inventory has:attachment after:${formatDateForGmail(todayStart)} before:${formatDateForGmail(todayEnd)}`,
-      `from:bestinksalesman@gmail.com subject:inventory has:attachment after:${formatDateForGmail(todayStart)} before:${formatDateForGmail(todayEnd)}`
+      'subject:inventory has:attachment filename:inventory.pdf',
+      'subject:inventory has:attachment',
+      'subject:stock has:attachment',
+      'subject:在庫 has:attachment',
+      'subject:データ has:attachment',
+      'from:bestinksalesman@gmail.com has:attachment'
     ];
     
     let allEmails = [];
+    let foundTargetEmails = false;
     
     for (const query of searchQueries) {
       console.log(`検索クエリ: ${query}`);
@@ -392,12 +671,19 @@ function searchInventoryEmails() {
         const messages = threads.flatMap(thread => thread.getMessages());
         allEmails = allEmails.concat(messages);
         console.log(`クエリ「${query}」で${messages.length}件のメールを発見`);
+        
+        // 該当メールが見つかった場合は早期終了
+        if (messages.length > 0) {
+          foundTargetEmails = true;
+          console.log('該当メールが見つかったため、検索を終了します');
+          break;
+        }
       } catch (queryError) {
         console.log(`クエリ「${query}」でエラー: ${queryError.message}`);
       }
     }
 
-    // 重複を除去し、日付でフィルタリング
+    // 重複を除去し、指定時間の±1時間以内のメールのみをフィルタリング
     const uniqueEmails = [];
     const seenIds = new Set();
     
@@ -406,23 +692,30 @@ function searchInventoryEmails() {
       if (!seenIds.has(msgId)) {
         seenIds.add(msgId);
         const msgDate = message.getDate();
-        const msgDateHK = new Date(msgDate.getTime() + (8 * 60 * 60 * 1000));
+        const msgDateHK = new Date(msgDate.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+        const msgTime = msgDateHK.toLocaleTimeString('ja-JP', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false
+        });
         
-        console.log(`メール確認: ${message.getSubject()}`);
-        console.log(`  UTC時間: ${msgDate.toISOString()}`);
-        console.log(`  香港時間: ${msgDateHK.toLocaleString('ja-JP')}`);
-        console.log(`  添付ファイル数: ${message.getAttachments().length}件`);
-        console.log(`  日付範囲チェック: ${msgDate >= todayStart && msgDate <= todayEnd}`);
+        // 時間を分に変換
+        const [msgHour, msgMinute] = msgTime.split(':').map(Number);
+        const msgTotalMinutes = msgHour * 60 + msgMinute;
         
-        // より柔軟な日付チェック（1日前から今日まで）
-        const yesterdayStart = new Date(todayStart.getTime() - (24 * 60 * 60 * 1000));
-        const tomorrowEnd = new Date(todayEnd.getTime() + (24 * 60 * 60 * 1000));
-        
-        if (msgDate >= yesterdayStart && msgDate <= tomorrowEnd && message.getAttachments().length > 0) {
-          uniqueEmails.push(message);
-          console.log(`✅ 該当メール発見: ${message.getSubject()} (UTC: ${msgDate.toISOString()}, 香港時間: ${msgDateHK.toLocaleString('ja-JP')})`);
-        } else {
-          console.log(`❌ 除外: ${message.getSubject()} - 日付範囲外または添付ファイルなし`);
+        // 指定時間の±1時間以内のメールのみを処理
+        if (msgTotalMinutes >= startMinutes && msgTotalMinutes <= endMinutes && message.getAttachments().length > 0) {
+          // 件名に条件キーワードが含まれているかチェック
+          const subject = message.getSubject().toLowerCase();
+          const hasConditionKeyword = CONFIG.EMAIL_CONDITIONS.some(keyword => 
+            subject.includes(keyword.toLowerCase())
+          );
+          
+          if (hasConditionKeyword) {
+            uniqueEmails.push(message);
+            const msgDate = msgDateHK.toLocaleDateString('ja-JP');
+            console.log(`✅ 該当メール発見: ${message.getSubject()} (${msgDate} ${msgTime})`);
+          }
         }
       }
     }
@@ -430,7 +723,7 @@ function searchInventoryEmails() {
     // 新しい順にソート
     uniqueEmails.sort((a, b) => b.getDate().getTime() - a.getDate().getTime());
     
-    console.log(`今日の該当メール数: ${uniqueEmails.length}件`);
+    console.log(`指定時間±1時間以内の該当メール数: ${uniqueEmails.length}件`);
     return uniqueEmails;
   } catch (error) {
     console.error('Gmail検索エラー:', error);
@@ -438,12 +731,6 @@ function searchInventoryEmails() {
   }
 }
 
-/**
- * Gmail検索クエリ用に日付を "YYYY/MM/DD" 形式にフォーマットします。
- */
-function formatDateForGmail(date) {
-  return date.toISOString().slice(0, 10).replace(/-/g, '/');
-}
 
 /**
  * メールから 'inventory.pdf' を含むPDF添付ファイルを取得します。
@@ -684,6 +971,61 @@ function parseInventoryData(summary) {
 }
 
 /**
+ * 作業終了お知らせメールを送信します。
+ */
+function sendCompletionNotification(processedEmail = null) {
+  try {
+    console.log('sendCompletionNotification開始');
+    const now = new Date();
+    const hongKongTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+    const completionTime = hongKongTime.toLocaleString('ja-JP');
+    
+    const subject = 'GASスクリプト定時作業"gmail-Inventory-AutoDataFill"完了お知らせ';
+    console.log(`送信先: ${CONFIG.GMAIL_ADDRESS}`);
+    console.log(`件名: ${subject}`);
+    
+    let fileInfo = '';
+    if (processedEmail) {
+      const emailDate = processedEmail.getDate();
+      const emailDateHK = new Date(emailDate.toLocaleString("en-US", {timeZone: "Asia/Hong_Kong"}));
+      const emailDateStr = emailDateHK.toLocaleString('ja-JP');
+      
+      fileInfo = `
+処理したファイル情報:
+- メール件名: ${processedEmail.getSubject()}
+- メール受信日時: ${emailDateStr}
+- 送信者: ${processedEmail.getFrom()}
+- 添付ファイル数: ${processedEmail.getAttachments().length}件
+`;
+    }
+    
+    const body = `
+在庫データの処理が正常に完了しました。
+
+処理完了時刻: ${completionTime}
+処理内容:
+- Gmail在庫メールの検索・解析
+- PDF添付ファイルのGemini AI解析
+- Google Sheetsへの在庫データ保存
+- StockシートのVLOOKUP式設定
+${fileInfo}
+処理は正常に完了しています。
+`;
+
+    console.log('メール送信実行中...');
+    GmailApp.sendEmail(
+      CONFIG.GMAIL_ADDRESS,
+      subject,
+      body
+    );
+    
+    console.log('✅ 作業終了お知らせメールを送信しました');
+  } catch (error) {
+    console.error('作業終了お知らせメールの送信に失敗しました:', error);
+  }
+}
+
+/**
  * エラー通知メールを送信します。
  */
 function sendErrorNotification(error) {
@@ -699,31 +1041,40 @@ function sendErrorNotification(error) {
 }
 
 /**
- * 定期実行トリガーを設定します (毎日午前と午後の2回)。
+ * 定期実行トリガーを設定します (指定時間: 8:05、13:05、18:17)。
  */
 function setupTriggers() {
   // 既存のトリガーを全て削除
   const triggers = ScriptApp.getProjectTriggers();
   for (const trigger of triggers) {
-    if (trigger.getHandlerFunction() === 'processInventoryEmails') {
+    if (trigger.getHandlerFunction() === 'main') {
       ScriptApp.deleteTrigger(trigger);
     }
   }
 
-  // 新しいトリガーを設定
-  ScriptApp.newTrigger('processInventoryEmails')
+  // 指定時間にトリガーを設定（香港時間）
+  ScriptApp.newTrigger('main')
     .timeBased()
     .everyDays(1)
-    .atHour(9) // 午前9時
+    .atHour(8)
+    .nearMinute(5) // 8:05
     .create();
 
-  ScriptApp.newTrigger('processInventoryEmails')
+  ScriptApp.newTrigger('main')
     .timeBased()
     .everyDays(1)
-    .atHour(15) // 午後3時
+    .atHour(13)
+    .nearMinute(5) // 13:05
+    .create();
+
+  ScriptApp.newTrigger('main')
+    .timeBased()
+    .everyDays(1)
+    .atHour(18)
+    .nearMinute(17) // 18:17
     .create();
     
-  console.log('定期実行トリガーを毎日午前9時と午後3時に設定しました。');
+  console.log('定期実行トリガーを指定時間（8:05、13:05、18:17）に設定しました。');
 }
 
 /**
@@ -774,12 +1125,25 @@ function testFullProcess() {
  */
 function setStockFormulas() {
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    console.log('=== Stock式設定開始 ===');
+    const ss = SpreadsheetApp.openById(CONFIG.SHEET_ID);
+    console.log(`スプレッドシートID: ${ss.getId()}`);
+    
     const stockSheet = ss.getSheetByName('Stock');
+    console.log(`Stockシート: ${stockSheet ? '発見' : '見つからない'}`);
     
     if (!stockSheet) {
-      console.error('Stockシートが見つかりません');
-      return;
+      console.error('Stockシートが見つかりません。Stockシートを作成します。');
+      // Stockシートを作成
+      const newStockSheet = ss.insertSheet('Stock');
+      console.log('Stockシートを作成しました');
+      
+      // ヘッダー行を設定
+      const headers = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'];
+      newStockSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      console.log('Stockシートのヘッダーを設定しました');
+      
+      return; // 新しく作成したシートにはデータがないので式設定をスキップ
     }
     
     // データの最後の行を取得（C列で判定）

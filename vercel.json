@@ -4,9 +4,17 @@
     {
       "src": "app.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "static/**",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
+    {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
     {
       "src": "/(.*)",
       "dest": "app.py"
@@ -15,9 +23,4 @@
   "env": {
     "FLASK_ENV": "production"
   }
-  ,
-  "crons": [
-    { "path": "/cron/inventory-sync", "schedule": "45 0 * * *" },
-    { "path": "/cron/inventory-sync", "schedule": "15 10 * * *" }
-  ]
 } 

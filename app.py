@@ -18,6 +18,8 @@ class KiriiInventoryPlatform:
     def __init__(self):
         # Googleシート設定
         self.sheet_url = os.getenv('GOOGLE_SHEET_URL', 'https://docs.google.com/spreadsheets/d/1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M/edit?usp=sharing')
+        print(f"🔍 デバッグ: GOOGLE_SHEET_URL = {self.sheet_url}")
+        print(f"🔍 デバッグ: GOOGLE_SERVICE_ACCOUNT_JSON設定済み = {bool(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))}")
         
         # HTMLエンティティデコード用のライブラリをインポート
         import html

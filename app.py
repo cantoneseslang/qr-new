@@ -18,6 +18,12 @@ class KiriiInventoryPlatform:
     def __init__(self):
         # Googleシート設定
         self.sheet_url = os.getenv('GOOGLE_SHEET_URL', 'https://docs.google.com/spreadsheets/d/1u_fsEVAumMySLx8fZdMP5M4jgHiGG6ncPjFEXSXHQ1M/edit?usp=sharing')
+        
+        # HTMLエンティティデコード用のライブラリをインポート
+        import html
+        import re
+        self.html = html
+        self.re = re
         self.use_google_sheets = bool(self.sheet_url)
         
         
@@ -34,46 +40,109 @@ class KiriiInventoryPlatform:
         else:
             print("📊 データソース: ローカル（フォールバック）")
 
+    def _decode_html_entities(self, text):
+        """HTMLエンティティをデコードする包括的なメソッド"""
+        if not text:
+            return ''
+        
+        # 方法1: 正規表現で数値エンティティを直接置換（最確実）
+        decoded = self.re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), text)
+        decoded = self.re.sub(r'&#x([0-9a-fA-F]+);', lambda m: chr(int(m.group(1), 16)), decoded)
+        
+        # 方法2: 手動置換（残りのエンティティ）
+        decoded = decoded.replace('&quot;', '"').replace('&apos;', "'")
+        decoded = decoded.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        decoded = decoded.replace('&nbsp;', ' ')
+        
+        # 方法3: html.unescape（バックアップ）
+        decoded = self.html.unescape(decoded)
+        
+        # 方法4: 連続するダブルクォートを1つに統一（"" → "）
+        decoded = self.re.sub(r'""+', '"', decoded)
+        
+        # 方法5: 先頭と末尾の不要なダブルクォートを除去
+        decoded = decoded.strip('"')
+        
+        # 方法6: 連続する空白を1つに統一
+        decoded = self.re.sub(r'\s+', ' ', decoded).strip()
+        
+        return decoded
+
     def _init_google_sheets(self):
         """Googleシート接続を初期化"""
         try:
+            print(f"🔍 デバッグ: シートURL = {self.sheet_url}")
             # シートIDを抽出
             self.sheet_id = self._extract_sheet_id_from_url(self.sheet_url)
+            print(f"🔍 デバッグ: シートID = {self.sheet_id}")
             if not self.sheet_id:
                 print("⚠️ 無効なシートURL")
                 self.use_google_sheets = False
                 return
                 
-            # API Key設定
-            self.api_key = "AIzaSyARbSHGDK-dCkmuP8ys7E2-G-treb3ZYIw"
+            # サービスアカウント認証（環境変数からJSONキーを取得）
+            self.sheets_service = None
+            self.api_key = None
             
-            # サービスアカウント認証（将来の拡張用）
-            if os.path.exists('google_service_account.json'):
+            # 環境変数からサービスアカウントJSONを取得
+            service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+            print(f"🔍 デバッグ: サービスアカウントJSON設定済み = {bool(service_account_json)}")
+            if service_account_json:
                 try:
                     # 依存が無い環境でも動作するよう遅延インポート
                     from google.oauth2 import service_account  # type: ignore
                     from googleapiclient.discovery import build  # type: ignore
+                    import json
 
-                    credentials = service_account.Credentials.from_service_account_file(
-                        'google_service_account.json',
+                    # JSON文字列をパース
+                    service_account_info = json.loads(service_account_json)
+                    
+                    credentials = service_account.Credentials.from_service_account_info(
+                        service_account_info,
                         scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
                     )
                     self.sheets_service = build('sheets', 'v4', credentials=credentials)
                     print("✅ サービスアカウント認証成功")
                 except Exception as e:
-                    print(f"⚠️ サービスアカウント認証失敗またはライブラリ未導入: {e}")
-                    print("📋 API Key方式を使用します")
-            
-            # Google Sheets API接続テスト（対象シート: Stock）
-            test_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:A1?key={self.api_key}"
-            test_response = requests.get(test_url, timeout=10)
-            
-            if test_response.status_code == 200:
-                print(f"✅ Googleシート接続成功 (ID: {self.sheet_id[:8]}...)")
-                self.use_google_sheets = True
+                    print(f"⚠️ サービスアカウント認証失敗: {e}")
+                    print("📋 API Key方式にフォールバック")
+                    self.api_key = "AIzaSyARbSHGDK-dCkmuP8ys7E2-G-treb3ZYIw"
             else:
-                print(f"❌ Googleシート接続失敗: {test_response.status_code}")
-                print("📋 フォールバックモードで動作")
+                print("⚠️ サービスアカウントJSONが設定されていません")
+                print("📋 API Key方式を使用します")
+                self.api_key = "AIzaSyARbSHGDK-dCkmuP8ys7E2-G-treb3ZYIw"
+            
+            # Google Sheets API接続テスト
+            if self.sheets_service:
+                # サービスアカウント認証での接続テスト
+                try:
+                    print(f"🔍 デバッグ: サービスアカウント認証で接続テスト開始")
+                    result = self.sheets_service.spreadsheets().values().get(
+                        spreadsheetId=self.sheet_id,
+                        range='Stock!A1:Y1'
+                    ).execute()
+                    print(f"✅ Googleシート接続成功 (サービスアカウント認証) (ID: {self.sheet_id[:8]}...)")
+                    print(f"🔍 デバッグ: 取得データ = {result}")
+                    self.use_google_sheets = True
+                except Exception as e:
+                    print(f"❌ Googleシート接続失敗 (サービスアカウント): {e}")
+                    print(f"🔍 デバッグ: エラー詳細 = {type(e).__name__}: {str(e)}")
+                    print("📋 フォールバックモードで動作")
+                    self.use_google_sheets = False
+            elif self.api_key:
+                # API Key認証での接続テスト
+                test_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1?key={self.api_key}"
+                test_response = requests.get(test_url, timeout=10)
+                
+                if test_response.status_code == 200:
+                    print(f"✅ Googleシート接続成功 (API Key認証) (ID: {self.sheet_id[:8]}...)")
+                    self.use_google_sheets = True
+                else:
+                    print(f"❌ Googleシート接続失敗: {test_response.status_code}")
+                    print("📋 フォールバックモードで動作")
+                    self.use_google_sheets = False
+            else:
+                print("❌ 認証方法が設定されていません")
                 self.use_google_sheets = False
                 
         except Exception as e:
@@ -92,7 +161,7 @@ class KiriiInventoryPlatform:
 
     def get_inventory_data(self):
         """在庫データを取得（Googleシートまたはローカル）"""
-        if self.use_google_sheets and hasattr(self, 'api_key'):
+        if self.use_google_sheets and (hasattr(self, 'sheets_service') or hasattr(self, 'api_key')):
             try:
                 return self._fetch_from_google_sheets()
             except Exception as e:
@@ -102,25 +171,33 @@ class KiriiInventoryPlatform:
         return self.fallback_inventory
 
     def _fetch_from_google_sheets(self):
-        """Googleシートからデータを取得（API Key方式）"""
+        """Googleシートからデータを取得（サービスアカウント認証またはAPI Key方式）"""
         import requests
         import time
         
         try:
-            # Google Sheets API URL（シート名: Stock、列範囲: A〜AE、十分な行数を取得）
-            api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:AE1500?key={self.api_key}"
-            
-            # Google Sheets APIからデータを取得（キャッシュ無効化ヘッダー付き）
-            headers = {
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
-                'Pragma': 'no-cache',
-                'Expires': '0'
-            }
-            response = requests.get(api_url, headers=headers, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            values = data.get('values', [])
+            if self.sheets_service:
+                # サービスアカウント認証でのデータ取得
+                result = self.sheets_service.spreadsheets().values().get(
+                    spreadsheetId=self.sheet_id,
+                        range='Stock!A1:Y1500'
+                ).execute()
+                values = result.get('values', [])
+            else:
+                # API Key認証でのデータ取得
+                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500?key={self.api_key}"
+                
+                # Google Sheets APIからデータを取得（キャッシュ無効化ヘッダー付き）
+                headers = {
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0'
+                }
+                response = requests.get(api_url, headers=headers, timeout=10)
+                response.raise_for_status()
+                
+                data = response.json()
+                values = data.get('values', [])
             
             if not values:
                 print("⚠️ Googleシートにデータがありません")
@@ -161,36 +238,41 @@ class KiriiInventoryPlatform:
                         number = next_auto_number
                         next_auto_number += 1
 
-                    # D列: 製品名（品名をD列参照に統一）
-                    name = row[3] if len(row) > 3 else ''
+                    # D列: 製品名（品名をD列参照に統一、HTMLエンティティをデコード）
+                    raw_name = row[3] if len(row) > 3 else ''
+                    name = self._decode_html_entities(raw_name)
+                    
+                    # デバッグ用：HTMLエンティティが含まれる製品名を確認
+                    if raw_name and ('&#34;' in str(raw_name) or '&#39;' in str(raw_name) or 'Marco' in str(raw_name) or 'Themawool' in str(raw_name)):
+                        print(f"🔍 DEBUG HTML: raw='{raw_name}', decoded='{name}'")
 
-                    # H列: 保管場所 正規化（空/"0"→"0"）
-                    raw_loc = row[7] if len(row) > 7 else ''
+                    # T列: 保管場所 正規化（空/"0"→"0"）
+                    raw_loc = row[19] if len(row) > 19 else ''
                     loc_str = str(raw_loc).strip()
                     normalized_loc = '0' if (loc_str == '' or loc_str == '0') else loc_str
 
-                    # K列: Available（在庫数量）カンマ付き・負数対応
-                    raw_qty = row[10] if len(row) > 10 else '0'
-                    qty_str = str(raw_qty).replace(',', '').strip()
-                    quantity = int(qty_str) if (qty_str and qty_str.lstrip('-').isdigit()) else 0
-
-                    # I列: On Hand（参考値）
-                    raw_on_hand = row[8] if len(row) > 8 else ''
+                    # U列: On Hand（参考値）
+                    raw_on_hand = row[20] if len(row) > 20 else ''
                     on_hand_str = str(raw_on_hand).replace(',', '').strip()
                     on_hand = int(on_hand_str) if (on_hand_str and on_hand_str.lstrip('-').isdigit()) else None
 
-                    # J列: w/o DN（出荷未処理）
-                    raw_wo = row[9] if len(row) > 9 else ''
+                    # V列: w/o DN（出荷未処理）
+                    raw_wo = row[21] if len(row) > 21 else ''
                     wo_str = str(raw_wo).replace(',', '').strip()
                     without_dn = int(wo_str) if (wo_str and wo_str.lstrip('-').isdigit()) else None
 
-                    # L列: Unit
-                    unit_val = row[11] if len(row) > 11 else ''
+                    # W列: Available（在庫数量）カンマ付き・負数対応
+                    raw_qty = row[22] if len(row) > 22 else '0'
+                    qty_str = str(raw_qty).replace(',', '').strip()
+                    quantity = int(qty_str) if (qty_str and qty_str.lstrip('-').isdigit()) else 0
 
-                    # M列: LastTime
-                    updated_val = row[12] if len(row) > 12 else datetime.now().strftime('%Y-%m-%d')
+                    # X列: Unit
+                    unit_val = row[23] if len(row) > 23 else ''
 
-                    # E列: Category-3
+                    # Y列: LastTime
+                    updated_val = row[24] if len(row) > 24 else datetime.now().strftime('%Y-%m-%d')
+
+                    # E列: Category
                     category_val = row[4] if len(row) > 4 else ''
 
                     inventory_data[number] = {
@@ -218,7 +300,9 @@ class KiriiInventoryPlatform:
                 
         except requests.RequestException as e:
             print(f"❌ Googleシート API リクエストエラー: {e}")
-            print(f"📋 API URL: {api_url}")
+            if hasattr(self, 'api_key') and self.api_key:
+                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500?key={self.api_key}"
+                print(f"📋 API URL: {api_url}")
             print(f"📋 レスポンスコード: {getattr(e.response, 'status_code', 'N/A')}")
             print(f"📋 レスポンス内容: {getattr(e.response, 'text', 'N/A')}")
             return self.fallback_inventory
@@ -237,6 +321,12 @@ class KiriiInventoryPlatform:
         """製品コードから番号への逆引き"""
         inventory = self.get_inventory_data()
         return {v["code"]: k for k, v in inventory.items()}
+
+    @property
+    def fallback_inventory(self):
+        """フォールバック用の在庫データ（Googleシート接続失敗時）"""
+        # Googleシート接続失敗時は空の辞書を返す（エラー表示のため）
+        return {}
 
 platform = KiriiInventoryPlatform()
 
@@ -292,6 +382,106 @@ def index():
     """メインページ - QRスキャン機能付き"""
     # Googleシートから最新の在庫データを取得
     inventory_data = platform.get_inventory_data()
+    
+    # Googleシート接続が失敗している場合はエラーメッセージを表示
+    if not inventory_data and not platform.use_google_sheets:
+        return render_template_string('''
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STOCK-AI-SCAN - 接続エラー</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: white;
+            min-height: 100vh;
+            color: #333;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .error-container {
+            max-width: 600px;
+            text-align: center;
+            padding: 40px;
+            border: 2px solid #dc3545;
+            border-radius: 15px;
+            background: #f8f9fa;
+        }
+        
+        .error-icon {
+            font-size: 4em;
+            color: #dc3545;
+            margin-bottom: 20px;
+        }
+        
+        .error-title {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #dc3545;
+            margin-bottom: 20px;
+        }
+        
+        .error-message {
+            font-size: 1.1em;
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .retry-button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .retry-button:hover {
+            background: #0056b3;
+            transform: translateY(-2px);
+        }
+        
+        .footer {
+            margin-top: 30px;
+            color: #6c757d;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="error-container">
+        <div class="error-icon">⚠️</div>
+        <div class="error-title">Googleシート接続エラー</div>
+        <div class="error-message">
+            Googleスプレッドシートに接続できませんでした。<br>
+            システム管理者にお問い合わせください。
+        </div>
+        <button class="retry-button" onclick="window.location.reload()">
+            🔄 再試行
+        </button>
+        <div class="footer">
+            STOCK-AI-SCAN / 庫存及AIQR掃描儀<br>
+            Copyright © Kirii (Hong Kong) Limited. All Rights Reserved.
+        </div>
+    </div>
+</body>
+</html>
+        ''')
     # クエリによるフィルタリング
     query = request.args.get('q', '').strip()
     cat = request.args.get('cat', '').strip()
@@ -320,20 +510,72 @@ def index():
         s = unicodedata.normalize('NFKC', str(label)).lower()
         s = s.replace('—', '-').replace('–', '-').replace('‐', '-')
         s = re.sub(r'\s+', '', s)
-        # mm Runner/Stud を統一（例: "50mm - S", "50mmS" など）
-        m = re.search(r'(\d+)mm[- ]?([rs])', s)
+        
+        # mm Runner/Stud を統一（例: "50mm - S", "50mmS", "50mm Runner" など）
+        m = re.search(r'(\d+)mm[- ]?(runner|stud|[rs])', s)
         if m:
-            return f"{m.group(1)}mm-{m.group(2)}"
+            kind = m.group(2).lower()
+            suffix = 'runner' if kind in ('runner', 'r') else 'stud'
+            return f"{m.group(1)}mm-{suffix}"
         # 2-1/2"-R/S を統一
-        m = re.search(r'2[- ]?1\/2\"?[- ]?([rs])', s)
+        m = re.search(r'2[- ]?1\/2\"?[- ]?(runner|stud|[rs])', s)
         if m:
-            return f"2-1/2\"-{m.group(1)}"
+            kind = m.group(1).lower()
+            suffix = 'runner' if kind in ('runner', 'r') else 'stud'
+            return f"2-1/2\"-{suffix}"
         # HD/SD 系
         m = re.search(r'^(hd|sd)[- ]?(\d+)$', s)
         if m:
             return f"{m.group(1)}-{m.group(2)}"
-        # 既知カテゴリは大文字・ハイフン抜きで丸め
+        
+        # 指定されたカテゴリのマッピング
+        category_mapping = {
+            'accessories': 'accessories',
+            'boardfibrecement': 'board-fibrecement',
+            'boardgwb': 'board-gwb',
+            'boardmacau': 'board-macau',
+            'ceilingsystemhd25': 'ceilingsystemhd-25',
+            'ceilingsystemsd19': 'ceilingsystemsd-19',
+            'metalangle': 'metalangle',
+            'screw': 'screw',
+            'teebarmk15': 'teebarmk-15',
+            'teebarmk24': 'teebarmk-24',
+            'teebarnewcolour1': 'teebarnewcolour1',
+            'uchannel': 'uchannel',
+            'venetianastmg90': 'venetianastm-g90',
+            'z-mk': 'z-mk',
+            'accesspanel': 'accesspanel'
+        }
+        
+        # より詳細なマッピング（括弧や特殊文字を含む）
+        detailed_mapping = {
+            'boardgwb(gyproc)': 'board-gwb',
+            'boardfibrecement': 'board-fibrecement',
+            'boardmacau': 'board-macau',
+            'ceilingsystemhd-25': 'ceilingsystemhd-25',
+            'ceilingsystemsd-19': 'ceilingsystemsd-19',
+            'metalangle': 'metalangle',
+            'screw': 'screw',
+            'teebar(mk-15)': 'teebarmk-15',
+            'teebar(mk-24)': 'teebarmk-24',
+            'teebar(newcolour)1': 'teebarnewcolour1',
+            'uchannel': 'uchannel',
+            'venetian(astm-g90)': 'venetianastm-g90',
+            'z-mk': 'z-mk',
+            'accesspanel': 'accesspanel'
+        }
+        
+        # 既知カテゴリのマッピング
         s2 = re.sub(r'[^a-z0-9]+', '', s)
+        
+        # 詳細マッピングを先にチェック
+        for key, value in detailed_mapping.items():
+            if key in s2:
+                return value
+        for key, value in category_mapping.items():
+            if key in s2:
+                return value
+        
         return s2
 
     # BDシリーズとFCシリーズの製品コードリスト
@@ -350,26 +592,29 @@ def index():
         'AC-260', 'AC-261', 'AC-262', 'AC-269', 'AC-270'
     ]
 
-    if cat:
-        from urllib.parse import unquote
-        cat_key = _canon_cat(unquote(cat))
-        
+    # cat変数をデコードして統一
+    from urllib.parse import unquote
+    cat_decoded = unquote(cat) if cat else ''
+    print(f"🔍 DEBUG: cat='{cat}', cat_decoded='{cat_decoded}'")  # デバッグ用
+    
+    if cat_decoded:
         # AllBoardフィルターの特別処理
-        if cat_key == 'allboard':
+        if cat_decoded == 'AllBoard':
             inventory_data = {
                 num: item for num, item in inventory_data.items()
                 if item.get('code', '') in bd_series_codes
             }
         # Allwoolフィルターの特別処理
-        elif cat_key == 'allwool':
+        elif cat_decoded == 'Allwool':
             inventory_data = {
                 num: item for num, item in inventory_data.items()
                 if item.get('code', '') in ac_series_codes
             }
         else:
+            # E列のカテゴリと直接比較
             inventory_data = {
                 num: item for num, item in inventory_data.items()
-                if _canon_cat(item.get('category', '')) == cat_key
+                if item.get('category', '') == cat_decoded
             }
     
     # カテゴリ一覧（件数順）
@@ -424,63 +669,57 @@ def index():
         lbl2 = lbl.replace('Runner', '-R').replace('Stud', '-S')
         return lbl2
 
-    # カテゴリを正規化しつつ集計（同義語・表記ゆれを束ねる）
+    # E列のカテゴリをそのまま使用（変換不要）
     raw_categories = [v.get('category', '') for v in platform.get_inventory_data().values()]
-    canon_counts = Counter([_canon_cat(c) for c in raw_categories if c])
+    print(f"🔍 E列のカテゴリデータ: {raw_categories[:10]}...")  # デバッグ用
+    
+    # 空でないカテゴリのみを集計（KSSを除外）
+    valid_categories = [c for c in raw_categories if c.strip() and c != 'KSS']
+    canon_counts = Counter(valid_categories)
+    print(f"🔍 カテゴリ集計: {dict(canon_counts)}")  # デバッグ用
     
     # AllBoardカテゴリの件数を計算
     all_inventory = platform.get_inventory_data()
     bd_count = sum(1 for item in all_inventory.values() if item.get('code', '') in bd_series_codes)
     if bd_count > 0:
-        canon_counts['allboard'] = bd_count
+        canon_counts['AllBoard'] = bd_count
     
     # Allwoolカテゴリの件数を計算
     ac_count = sum(1 for item in all_inventory.values() if item.get('code', '') in ac_series_codes)
     if ac_count > 0:
-        canon_counts['allwool'] = ac_count
+        canon_counts['Allwool'] = ac_count
     
-    # 表示用ラベル（最初に見つかったものを短縮整形して採用）
-    canon_to_display = {}
-    for c in raw_categories:
-        k = _canon_cat(c)
-        if k and k not in canon_to_display:
-            canon_to_display[k] = normalize_label(c)
-    
-    # AllBoardの表示ラベルを設定
-    if bd_count > 0:
-        canon_to_display['allboard'] = 'AllBoard'
-    
-    # Allwoolの表示ラベルを設定
-    if ac_count > 0:
-        canon_to_display['allwool'] = 'Allwool'
+    # E列の値をそのまま使用するため、変換マッピングは不要
 
-    # 並び順キー: 正規化キーで判定
-    def category_sort_key_canon(canon: str):
-        # AllBoardを最優先で表示
-        if canon == 'allboard':
-            return (-1, 0, 0, canon)
-        # Allwoolを次に優先で表示
-        if canon == 'allwool':
-            return (-1, 1, 0, canon)
-        m = re.match(r'^(\d+)mm-([rs])$', canon)
-        if m:
-            return (0, int(m.group(1)), 0 if m.group(2) == 'r' else 1, canon)
-        if canon.startswith('2-1/2"-'):
-            # 63.5mm相当、R優先
-            return (0, 63, 0 if canon.endswith('-r') else 1, canon)
-        m = re.match(r'^(hd|sd)-(\d+)$', canon)
-        if m:
-            return (1 if m.group(1) == 'hd' else 2, int(m.group(2)), 0, canon)
-        known = ['accesspanel','access','bdgr','bdfc','bdmc','mangle','screw',
-                 'teebarmk15','teebarmk24','tbarnc','uch','astmg90','amk','zmk','boardmacau']
-        for idx, name in enumerate(known):
-            if canon.startswith(name):
-                return (3, idx, 0, canon)
-        return (4, canon)
-
-    ordered_canon = sorted(canon_counts.keys(), key=category_sort_key_canon)
-    top_categories_canon = ordered_canon[:10]
-    ordered_cnt = [(c, canon_counts[c]) for c in ordered_canon]
+    # E列の実際の値に基づく順序（ユーザー指定の順序）
+    predefined_order = [
+        'AllBoard', 'Allwool', '50mm Runner', '50mm Stud', '2-1/2" Runner', '51mm Runner',
+        '51mm Stud', '64mm Runner', '64mm Stud', '75mm Runner', '75mm Stud', '76mm Runner',
+        '76mm Stud', '86mm Runner', '86mm Stud', '92mm Runner', '92mm Stud',
+        '100mm Runner', '100mm Stud', '102mm Runner', '102mm Stud', '125mm Runner', '125mm Stud',
+        '127mm Runner', '127mm Stud', '150mm Runner', '150mm Stud', '152mm Runner', '152mm Stud',
+        'Accessories', 'Board- Fibre Cement', 'Board- GWB (GypRoc)', 'Board- Macau',
+        'Ceiling System HD-25', 'Ceiling System SD-19', 'Metal Angle', 'SCREW', 'Tee-Bar (MK -15)',
+        'Tee-Bar (MK -24)', 'Tee-Bar(New Colour)1', 'U-Channel', 'Venetian (ASTM-G90)', 'Z-MK', 'Access Panel'
+    ]
+    
+    # 既存のカテゴリを指定順に並べる
+    ordered_categories = []
+    for cat in predefined_order:
+        if cat in canon_counts:
+            ordered_categories.append(cat)
+    
+    # 指定順にないカテゴリを最後に追加
+    for cat in canon_counts.keys():
+        if cat not in ordered_categories:
+            ordered_categories.append(cat)
+    
+    print(f"🔍 順序付けられたカテゴリ: {ordered_categories}")  # デバッグ用
+    
+    top_categories_canon = ordered_categories[:10]
+    ordered_cnt = [(c, canon_counts[c]) for c in ordered_categories]
+    
+    print(f"🔍 表示用カテゴリ（最初の10個）: {top_categories_canon}")  # デバッグ用
 
     return render_template_string('''
 <!DOCTYPE html>
@@ -766,17 +1005,18 @@ def index():
 
             <!-- Category chips -->
             <div class="chip-bar">
-                <a class="chip {{ 'active' if not cat else '' }}" href="/">All<span class="chip-count"></span></a>
-                {% if 'allboard' in canon_to_display %}
-                <a class="chip {{ 'active' if cat=='allboard' else '' }}" href="/?cat=allboard">{{ canon_to_display['allboard'] }}<span class="chip-count">{{ dict(ordered_cnt).get('allboard', 0) }}</span></a>
+                <!-- DEBUG: cat='{{ cat }}', cat_decoded='{{ cat_decoded }}' -->
+                <a class="chip {{ 'active' if not cat_decoded or cat_decoded == '' else '' }}" href="/">All<span class="chip-count"></span></a>
+                {% if 'AllBoard' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='AllBoard' else '' }}" href="/?cat=AllBoard">AllBoard<span class="chip-count">{{ canon_counts.get('AllBoard', 0) }}</span></a>
                 {% endif %}
-                {% if 'allwool' in canon_to_display %}
-                <a class="chip {{ 'active' if cat=='allwool' else '' }}" href="/?cat=allwool">{{ canon_to_display['allwool'] }}<span class="chip-count">{{ dict(ordered_cnt).get('allwool', 0) }}</span></a>
+                {% if 'Allwool' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Allwool' else '' }}" href="/?cat=Allwool">Allwool<span class="chip-count">{{ canon_counts.get('Allwool', 0) }}</span></a>
                 {% endif %}
                 <button class="more-btn" onclick="openSheet()">More</button>
                 {% for c in top_categories %}
-                {% if c != 'allboard' and c != 'allwool' %}
-                <a class="chip {{ 'active' if cat==c else '' }}" href="/?cat={{ c | urlencode }}">{{ canon_to_display.get(c, c) }}<span class="chip-count">{{ dict(ordered_cnt).get(c, 0) }}</span></a>
+                {% if c != 'AllBoard' and c != 'Allwool' %}
+                <a class="chip {{ 'active' if cat_decoded==c else '' }}" href="/?cat={{ c | urlencode }}">{{ c }}<span class="chip-count">{{ canon_counts.get(c, 0) }}</span></a>
                 {% endif %}
                 {% endfor %}
             </div>
@@ -787,7 +1027,7 @@ def index():
                 <input id="cat-search" type="text" placeholder="Search category..." style="width:100%; padding:8px; border:1px solid #dee2e6; border-radius:8px; font-size:12px; margin-bottom:8px;">
                 <div class="grid" id="cat-grid">
                     {% for c, n in ordered_cnt %}
-                    <button data-label="{{ c }}" onclick="selectCat('{{ c | urlencode }}')">{{ canon_to_display.get(c, normalize_label(c)) }} ({{ n }})</button>
+                    <button data-label="{{ c }}" onclick="selectCat('{{ c | urlencode }}')">{{ c }} ({{ n }})</button>
                     {% endfor %}
                 </div>
                 <div style="text-align:center; margin-top:8px;"><button class="more-btn" onclick="closeSheet()">Close</button></div>
@@ -980,16 +1220,29 @@ def index():
         });
         // Download stock list function
         function downloadStockList() {
-            // Create CSV content with BOM for proper UTF-8 encoding
-            let csvContent = "\\uFEFFNumber,3個字,Product Code,Product Short Description,Category-2,Category-3,Category-4,Stock\\n";
+            // Create CSV content with UTF-8 BOM for proper encoding (Complete Google Sheet mapping)
+            let csvContent = "\\uFEFFNumber,Product_Code,Product_Name,Category,Stock_Location,On_Hand,Without_DN,Available_Quantity,Unit,Last_Updated\\n";
             
             // Add data from inventory
             {% for number, product in inventory_data.items() %}
-            csvContent += "{{ number }},{{ product.code.split('-')[0] if '-' in product.code else '' }},{{ product.code }},{{ product.name | replace('"', '""') }},{{ product.category or '' }},{{ 'Merchandises' if 'merchandises' in ((product.category or '')|lower) else product.category or '' }},{{ product.category or '' }},{{ product.location or '0' }}\\n";
+            // 製品名を安全にCSV用にエスケープ
+            var productName = "{{ product.name | replace('"', '""') | replace('\\n', ' ') | replace('\\r', ' ') | replace(',', '，') }}";
+            // HTMLエンティティを再度デコード（Jinja2で再エンコードされた可能性）
+            productName = productName.replace(/&#34;/g, '"').replace(/&#39;/g, "'");
+            productName = productName.replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+            productName = productName.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+            productName = productName.replace(/&nbsp;/g, ' ');
+            // 連続するダブルクォートを1つに統一
+            productName = productName.replace(/""+/g, '"');
+            
+            csvContent += "{{ number }},{{ product.code }}," + productName + ",{{ product.category or '' }},{{ product.location or '0' }},{{ product.on_hand or '' }},{{ product.without_dn or '' }},{{ product.quantity or '0' }},{{ product.unit or '' }},{{ product.updated or '' }}\\n";
             {% endfor %}
             
-            // Create and download file with UTF-8 BOM
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            // Create and download file with proper UTF-8 encoding
+            const blob = new Blob([csvContent], { 
+                type: 'text/csv;charset=utf-8;',
+                endings: 'native'
+            });
             const link = document.createElement('a');
             const url = URL.createObjectURL(blob);
             link.setAttribute('href', url);
@@ -1035,36 +1288,37 @@ def index():
     inventory_data=inventory_data,
     query=query,
     cat=cat,
+    cat_decoded=cat_decoded,
     top_categories=top_categories_canon,
-    canon_to_display=canon_to_display,
-    normalize_label=normalize_label,
+    canon_counts=canon_counts,
     ordered_cnt=ordered_cnt
     )
 
 @app.route('/product/<int:product_number>')
 def product_detail(product_number):
     """製品詳細ページ - QRコード番号からアクセス"""
-    # Googleシートから最新の在庫データを取得
-    inventory_data = platform.get_inventory_data()
-    
-    if product_number not in inventory_data:
-        return render_template_string('''
+    try:
+        # Googleシートから最新の在庫データを取得
+        inventory_data = platform.get_inventory_data()
+        
+        if product_number not in inventory_data:
+            return render_template_string('''
         <div style="text-align: center; padding: 50px; font-family: Arial, sans-serif; background: white; color: #333;">
             <h1>❌ 製品が見つかりません</h1>
             <p>番号: {{ number }}</p>
             <a href="/" style="color: #007bff;">トップページに戻る</a>
         </div>
         ''', number=product_number), 404
-    
-    product = inventory_data[product_number]
-    
-    return render_template_string('''
+        
+        product = inventory_data[product_number]
+        
+        return render_template_string('''
 <!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📦 {{ product.name }} - STOCK-AI-SCAN</title>
+    <title>📦 {{ product.name | replace('&#34;', '"') | replace('&#39;', "'") | replace('&quot;', '"') | replace('&apos;', "'") | replace('&amp;', '&') | replace('&lt;', '<') | replace('&gt;', '>') }} - STOCK-AI-SCAN</title>
     <style>
         * {
             margin: 0;
@@ -1320,7 +1574,7 @@ def product_detail(product_number):
         
         <div class="product-card">
             <div class="product-code-line">產品編碼 | {{ product.code }}</div>
-            <div class="product-name">{{ product.name }}</div>
+            <div class="product-name">{{ product.name | replace('&#34;', '"') | replace('&#39;', "'") | replace('&quot;', '"') | replace('&apos;', "'") | replace('&amp;', '&') | replace('&lt;', '<') | replace('&gt;', '>') }}</div>
             
             <div class="details-grid">
                 <div class="detail-item">
@@ -1400,10 +1654,26 @@ def product_detail(product_number):
                 }
             });
         });
+        
+        // 製品詳細ページ用の関数
+        function showProductDetail(number) {
+            window.location.href = '/product/' + number;
+        }
     </script>
 </body>
 </html>
     ''', product=product, number=product_number)
+    
+    except Exception as e:
+        print(f"❌ 製品詳細ページエラー (番号: {product_number}): {e}")
+        return render_template_string('''
+        <div style="text-align: center; padding: 50px; font-family: Arial, sans-serif; background: white; color: #333;">
+            <h1>❌ エラーが発生しました</h1>
+            <p>製品番号: {{ number }}</p>
+            <p>エラー: {{ error }}</p>
+            <a href="/" style="color: #007bff;">トップページに戻る</a>
+        </div>
+        ''', number=product_number, error=str(e)), 500
 
 @app.route('/api/inventory')
 def api_inventory():

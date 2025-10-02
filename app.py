@@ -106,11 +106,11 @@ class KiriiInventoryPlatform:
                 except Exception as e:
                     print(f"⚠️ サービスアカウント認証失敗: {e}")
                     print("📋 API Key方式にフォールバック")
-                    self.api_key = "AIzaSyARbSHGDK-dCkmuP8ys7E2-G-treb3ZYIw"
+                    self.api_key = "AIzaSyDIZ8mvJJiuds4YAtlpfLlB3x9-gSSGeNA"
             else:
                 print("⚠️ サービスアカウントJSONが設定されていません")
                 print("📋 API Key方式を使用します")
-                self.api_key = "AIzaSyARbSHGDK-dCkmuP8ys7E2-G-treb3ZYIw"
+                self.api_key = "AIzaSyDIZ8mvJJiuds4YAtlpfLlB3x9-gSSGeNA"
             
             # Google Sheets API接続テスト
             if self.sheets_service:

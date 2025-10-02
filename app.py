@@ -88,6 +88,7 @@ class KiriiInventoryPlatform:
             service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
             print(f"🔍 デバッグ: サービスアカウントJSON設定済み = {bool(service_account_json)}")
             if service_account_json:
+                print(f"🔍 デバッグ: サービスアカウントJSON内容 = {service_account_json[:100]}...")
                 try:
                     # 依存が無い環境でも動作するよう遅延インポート
                     from google.oauth2 import service_account  # type: ignore
@@ -96,6 +97,7 @@ class KiriiInventoryPlatform:
 
                     # JSON文字列をパース
                     service_account_info = json.loads(service_account_json)
+                    print(f"🔍 デバッグ: サービスアカウント情報 = {service_account_info.get('client_email', 'N/A')}")
                     
                     credentials = service_account.Credentials.from_service_account_info(
                         service_account_info,
@@ -117,6 +119,8 @@ class KiriiInventoryPlatform:
                 # サービスアカウント認証での接続テスト
                 try:
                     print(f"🔍 デバッグ: サービスアカウント認証で接続テスト開始")
+                    print(f"🔍 デバッグ: シートID = {self.sheet_id}")
+                    print(f"🔍 デバッグ: 範囲 = Stock!A1:Y1")
                     result = self.sheets_service.spreadsheets().values().get(
                         spreadsheetId=self.sheet_id,
                         range='Stock!A1:Y1'

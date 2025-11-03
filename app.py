@@ -1781,6 +1781,19 @@ def product_detail_by_code(product_code):
         print(f"ロゴ読み込みエラー: {e}")
         return "KIRII", 200, {'Content-Type': 'text/plain'}
 
+
+@app.route('/favicon.ico')
+def favicon():
+    """ファビコンを提供（ロゴ画像をfaviconとして返す）"""
+    # ロゴと同じBase64データを使用（上記のlogo_base64変数を再利用）
+    try:
+        import base64
+        logo_data = base64.b64decode(logo_base64)
+        return logo_data, 200, {'Content-Type': 'image/png'}
+    except Exception as e:
+        print(f"ファビコン読み込みエラー: {e}")
+        return '', 204, {'Content-Type': 'image/x-icon'}
+
 if __name__ == '__main__':
     print("🏭 KIRII在庫管理Vercelプラットフォーム起動")
     print("📱 携帯対応在庫確認システム")

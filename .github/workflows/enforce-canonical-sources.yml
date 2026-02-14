@@ -1,0 +1,59 @@
+name: Enforce Canonical Sources
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  block-noncanonical-monitor-code:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Block forbidden monitor python files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          forbidden_files=(
+            "factory_monitor_clean/cctv_streaming_fixed.py"
+            "khk/app.py"
+            "khk-monitor/app.py"
+            "khkmon/app.py"
+            "khkmonitor/app.py"
+          )
+
+          found=0
+          for f in "${forbidden_files[@]}"; do
+            if [ -f "$f" ]; then
+              echo "ERROR: Forbidden monitor source exists: $f"
+              found=1
+            fi
+          done
+
+          if [ "$found" -ne 0 ]; then
+            echo "Failing because non-canonical monitor sources were found."
+            exit 1
+          fi
+
+      - name: Ensure canonical files exist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_files=(
+            "cctv_streaming_fixed.py"
+            "KHK-AI-DETECT-MONITOR/app.py"
+            "kirii_inventory_vercel/app.py"
+            "kirii_inventory_vercel/vercel.json"
+            "CANONICAL_CODE_SOURCES_LOCK.md"
+          )
+
+          for f in "${required_files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Required canonical file missing: $f"
+              exit 1
+            fi
+          done

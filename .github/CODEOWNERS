@@ -1,0 +1,13 @@
+# Default owner
+* @cantoneseslang
+
+# Canonical monitor sources (must stay controlled)
+/cctv_streaming_fixed.py @cantoneseslang
+/KHK-AI-DETECT-MONITOR/app.py @cantoneseslang
+
+# Canonical inventory STOCK-AI-SCAN sources
+/kirii_inventory_vercel/app.py @cantoneseslang
+/kirii_inventory_vercel/vercel.json @cantoneseslang
+
+# Canonical lock document
+/CANONICAL_CODE_SOURCES_LOCK.md @cantoneseslang

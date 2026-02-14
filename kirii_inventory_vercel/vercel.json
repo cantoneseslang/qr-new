@@ -18,10 +18,5 @@
   "crons": [
     { "path": "/cron/inventory-sync", "schedule": "45 0 * * *" },
     { "path": "/cron/inventory-sync", "schedule": "15 10 * * *" }
-  ],
-  "functions": {
-    "app.py": {
-      "maxDuration": 30
-    }
-  }
+  ]
 } 

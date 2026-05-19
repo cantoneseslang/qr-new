@@ -174,6 +174,64 @@ class KiriiInventoryPlatform:
             pass
         return None
 
+    def _get_sheet_values(self, sheet_range):
+        """Google Sheets API から指定範囲の値を取得"""
+        import requests
+        api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/{sheet_range}"
+        if self.credentials:
+            if not self.credentials.valid:
+                from google.auth.transport.requests import Request  # type: ignore
+                self.credentials.refresh(Request())
+            response = requests.get(
+                api_url,
+                headers={'Authorization': f'Bearer {self.credentials.token}'},
+                timeout=15,
+            )
+        else:
+            response = requests.get(api_url, params={'key': self.api_key}, timeout=15)
+        response.raise_for_status()
+        return response.json().get('values', [])
+
+    @staticmethod
+    def _parse_sheet_quantity(value):
+        """シート数量を整数化（1,189.00 等の小数・カンマ対応）"""
+        if value is None or value == '':
+            return None
+        s = str(value).replace(',', '').strip()
+        if not s or s.startswith('#'):
+            return None
+        try:
+            return int(round(float(s)))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_product_code_key(code):
+        import re
+        return re.sub(r'\s+', '', str(code or '').strip().upper())
+
+    def _fetch_inventory_summary_by_code(self):
+        """Gmail同期先 InventorySummaryReport を製品コード索引に変換"""
+        summary = {}
+        try:
+            rows = self._get_sheet_values('InventorySummaryReport!A2:E3000')
+            for row in rows:
+                if not row or not str(row[0]).strip():
+                    continue
+                code_key = self._normalize_product_code_key(row[0])
+                on_hand = self._parse_sheet_quantity(row[2] if len(row) > 2 else '')
+                without_dn = self._parse_sheet_quantity(row[3] if len(row) > 3 else '')
+                quantity = self._parse_sheet_quantity(row[4] if len(row) > 4 else '')
+                summary[code_key] = {
+                    'on_hand': on_hand,
+                    'without_dn': without_dn,
+                    'quantity': 0 if quantity is None else quantity,
+                }
+            print(f"✅ InventorySummaryReport {len(summary)}件を読込")
+        except Exception as e:
+            print(f"⚠️ InventorySummaryReport取得エラー: {e}")
+        return summary
+
     def get_inventory_data(self):
         """在庫データを取得（Googleシートまたはローカル）"""
         if self._inventory_cache is not None and time.time() - self._inventory_cache_at < 60:
@@ -248,6 +306,7 @@ class KiriiInventoryPlatform:
                             pass
 
             next_auto_number = max_number + 1
+            summary_by_code = self._fetch_inventory_summary_by_code()
             inventory_data = {}
             for row in rows:
                 try:
@@ -279,20 +338,24 @@ class KiriiInventoryPlatform:
                     loc_str = str(raw_loc).strip()
                     normalized_loc = '0' if (loc_str == '' or loc_str == '0') else loc_str
 
-                    # U列: On Hand（参考値）
+                    # U/V/W列: StockのVLOOKUP結果（失敗時0になるためSummaryを優先）
                     raw_on_hand = row[20] if len(row) > 20 else ''
-                    on_hand_str = str(raw_on_hand).replace(',', '').strip()
-                    on_hand = int(on_hand_str) if (on_hand_str and on_hand_str.lstrip('-').isdigit()) else None
-
-                    # V列: w/o DN（出荷未処理）
                     raw_wo = row[21] if len(row) > 21 else ''
-                    wo_str = str(raw_wo).replace(',', '').strip()
-                    without_dn = int(wo_str) if (wo_str and wo_str.lstrip('-').isdigit()) else None
+                    raw_qty = row[22] if len(row) > 22 else ''
+                    on_hand = self._parse_sheet_quantity(raw_on_hand)
+                    without_dn = self._parse_sheet_quantity(raw_wo)
+                    quantity = self._parse_sheet_quantity(raw_qty)
+                    if quantity is None:
+                        quantity = 0
 
-                    # W列: Available（在庫数量）カンマ付き・負数対応
-                    raw_qty = row[22] if len(row) > 22 else '0'
-                    qty_str = str(raw_qty).replace(',', '').strip()
-                    quantity = int(qty_str) if (qty_str and qty_str.lstrip('-').isdigit()) else 0
+                    summary = summary_by_code.get(self._normalize_product_code_key(code_cell))
+                    if summary:
+                        if summary['on_hand'] is not None:
+                            on_hand = summary['on_hand']
+                        if summary['without_dn'] is not None:
+                            without_dn = summary['without_dn']
+                        if summary['quantity'] is not None:
+                            quantity = summary['quantity']
 
                     # X列: Unit
                     unit_val = row[23] if len(row) > 23 else ''

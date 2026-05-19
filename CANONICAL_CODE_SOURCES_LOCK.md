@@ -13,8 +13,9 @@
 
 ## 2) モニター簡易版 (Vercel Side)
 
-- 正規コード: `E:/factory_monitoring_system/KHK-AI-DETECT-MONITOR/app.py`
-- 役割: Vercel側で運用する簡易版の唯一ソース
+- 正規コード: `E:/factory_monitoring_system/vercel_minimal/app.py`
+- 正規設定: `E:/factory_monitoring_system/vercel_minimal/vercel.json`
+- 役割: `https://khk-monitor.vercel.app` の Group A / Group B 画面の唯一ソース
 
 ## 3) 在庫 STOCK-AI-SCAN
 
@@ -32,5 +33,24 @@
 ## 運用固定
 
 - モニター本体の確認は `cctv_streaming_fixed.py` のみ。
-- モニター簡易版の確認は `KHK-AI-DETECT-MONITOR/app.py` のみ。
+- モニター簡易版の確認は `vercel_minimal/app.py` と `vercel_minimal/vercel.json` のみ。
 - 在庫系の確認は `kirii_inventory_vercel/app.py` と `kirii_inventory_vercel/vercel.json` のみ。
+
+## 4) アルミ・Mysteel GAS（スプレッドシート書き込み）
+
+- 正規ドキュメント: `E:/factory_monitoring_system/docs/ALUMINUM_GAS_PIPELINE_LOCK.md`
+- 正規コード: `E:/factory_monitoring_system/gas_aluminum_clasp/aluminum_price_sheet_automation.gs`（`clasp push` の唯一ソース）
+- スプレッドシート ID・タブ名の定義は **`ALU_CANON_`** と上記 MD のみを採用する。
+
+## 5) 在庫 Gmail GAS（InventorySummaryReport 同期）
+
+- 正規コード: `E:/factory_monitoring_system/kirii_inventory_vercel/gas-inventory/gmail_inventory_processor-mac.gs.js`（`clasp push` の唯一ソース）
+- 正規設定: `E:/factory_monitoring_system/kirii_inventory_vercel/gas-inventory/.clasp.json`
+- デプロイ: `kirii_inventory_vercel/gas-inventory/` で `clasp push`（または `clasp-push.ps1`）
+- 旧パス `kirii_inventory_vercel/gmail_inventory_processor-mac.gs.js` は使用禁止。
+
+## 旧フォルダ整理（2026-03）
+
+- `khk-monitor/` は保守対象外として削除。
+- `khkmon/` は保守対象外として削除。
+- `khkmonitor/` は保守対象外として削除。

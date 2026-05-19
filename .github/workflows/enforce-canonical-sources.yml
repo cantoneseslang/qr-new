@@ -20,9 +20,6 @@ jobs:
           forbidden_files=(
             "factory_monitor_clean/cctv_streaming_fixed.py"
             "khk/app.py"
-            "khk-monitor/app.py"
-            "khkmon/app.py"
-            "khkmonitor/app.py"
           )
 
           found=0
@@ -45,10 +42,12 @@ jobs:
 
           required_files=(
             "cctv_streaming_fixed.py"
-            "KHK-AI-DETECT-MONITOR/app.py"
+            "vercel_minimal/app.py"
+            "vercel_minimal/vercel.json"
             "kirii_inventory_vercel/app.py"
             "kirii_inventory_vercel/vercel.json"
             "CANONICAL_CODE_SOURCES_LOCK.md"
+            "docs/ALUMINUM_GAS_PIPELINE_LOCK.md"
           )
 
           for f in "${required_files[@]}"; do

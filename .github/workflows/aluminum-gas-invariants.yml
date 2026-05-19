@@ -1,0 +1,34 @@
+# アルミ Mysteel GAS: 正規スプレッドシート ID・镀锌タブ名の欠落を検知
+# 変更する場合は docs/ALUMINUM_GAS_PIPELINE_LOCK.md と gas_aluminum_clasp/ を同時更新すること。
+
+name: Aluminum GAS Invariants
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lock file and GAS must mention canonical ids
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOC=docs/ALUMINUM_GAS_PIPELINE_LOCK.md
+          GAS=gas_aluminum_clasp/aluminum_price_sheet_automation.gs
+          test -f "$DOC" || { echo "ERROR: $DOC is required"; exit 1; }
+          test -f "$GAS" || { echo "ERROR: $GAS is required"; exit 1; }
+          # Spreadsheet
+          ID="1RQb5fBTipFZPslbG60vP46DJZ8ZD9D7a7_eaKw718nM"
+          GALV="镀锌板卷价格-2"
+          grep -qF "$ID" "$DOC" || { echo "ERROR: $DOC must contain spreadsheet id"; exit 1; }
+          grep -qF "$ID" "$GAS" || { echo "ERROR: $GAS must contain canonical SPREADSHEET_ID"; exit 1; }
+          grep -qF "$GALV" "$GAS" || { echo "ERROR: $GAS must contain镀锌 tab 镀锌板卷价格-2 in ALU_CANON_"; exit 1; }
+          grep -q "ALU_CANON_" "$GAS" || { echo "ERROR: $GAS must define ALU_CANON_ (single source of truth)"; exit 1; }
+          grep -q "assertAluPipelineInvariants_" "$GAS" || { echo "ERROR: $GAS must define assertAluPipelineInvariants_"; exit 1; }
+          echo "OK: ALU GAS invariants present."

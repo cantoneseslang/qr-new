@@ -208,25 +208,67 @@ class KiriiInventoryPlatform:
     @staticmethod
     def _normalize_product_code_key(code):
         import re
-        return re.sub(r'\s+', '', str(code or '').strip().upper())
+        s = str(code or '').strip().upper()
+        s = re.sub(r"[|'\"`]", '', s)
+        s = re.sub(r'[‐‑‒–—―ー]', '-', s)
+        s = re.sub(r'\s+', '', s)
+        s = re.sub(r'[^A-Z0-9-]', '', s)
+        m = re.match(r'^([A-Z]{1,4})-([0-9O]+)$', s)
+        if m:
+            s = f"{m[1]}-{m[2].replace('O', '0')}"
+        if s == 'GSC08I11000B':
+            s = 'GSC08I1000B'
+        return s
+
+    def _lookup_summary_row(self, summary_by_code, code):
+        """Summary行を製品コードで検索（完全一致→OCRゆれフォールバック）"""
+        code_key = self._normalize_product_code_key(code)
+        hit = summary_by_code.get(code_key)
+        if hit:
+            return hit
+
+        # I/1, O/0 等のOCRゆれを許容
+        variants = {code_key}
+        variants.add(code_key.replace('I', '1').replace('O', '0'))
+        variants.add(code_key.replace('1', 'I').replace('0', 'O'))
+        for v in variants:
+            if v in summary_by_code:
+                return summary_by_code[v]
+
+        if len(code_key) >= 8:
+            prefix = code_key[:6]
+            candidates = [
+                (k, v) for k, v in summary_by_code.items()
+                if k.startswith(prefix) and abs(len(k) - len(code_key)) <= 2
+            ]
+            if len(candidates) == 1:
+                return candidates[0][1]
+        return None
 
     def _fetch_inventory_summary_by_code(self):
         """Gmail同期先 InventorySummaryReport を製品コード索引に変換"""
         summary = {}
         try:
-            rows = self._get_sheet_values('InventorySummaryReport!A2:E3000')
+            rows = self._get_sheet_values('InventorySummaryReport!A2:E5000')
             for row in rows:
                 if not row or not str(row[0]).strip():
                     continue
                 code_key = self._normalize_product_code_key(row[0])
+                if not code_key:
+                    continue
                 on_hand = self._parse_sheet_quantity(row[2] if len(row) > 2 else '')
                 without_dn = self._parse_sheet_quantity(row[3] if len(row) > 3 else '')
                 quantity = self._parse_sheet_quantity(row[4] if len(row) > 4 else '')
-                summary[code_key] = {
+                if quantity is None:
+                    quantity = 0
+                entry = {
                     'on_hand': on_hand,
                     'without_dn': without_dn,
-                    'quantity': 0 if quantity is None else quantity,
+                    'quantity': quantity,
                 }
+                prev = summary.get(code_key)
+                if prev is None or quantity > (prev.get('quantity') or 0):
+                    summary[code_key] = entry
             print(f"✅ InventorySummaryReport {len(summary)}件を読込")
         except Exception as e:
             print(f"⚠️ InventorySummaryReport取得エラー: {e}")
@@ -348,7 +390,7 @@ class KiriiInventoryPlatform:
                     if quantity is None:
                         quantity = 0
 
-                    summary = summary_by_code.get(self._normalize_product_code_key(code_cell))
+                    summary = self._lookup_summary_row(summary_by_code, code_cell)
                     if summary:
                         if summary['on_hand'] is not None:
                             on_hand = summary['on_hand']
@@ -748,14 +790,17 @@ def index():
     screw_codes_set = {normalize_filter_code(c) for c in screw_codes}
 
     CODE_BASED_FILTERS = {
-        'AllBoard': lambda c: normalize_code(c) in bd_series_codes_set,
-        'TaishanBoard': lambda c: normalize_code(c) in taishan_board_codes_set,
-        'Board- Fibre Cement': lambda c: normalize_filter_code(c) in fibre_cement_codes_set,
-        'Allwool': lambda c: normalize_code(c) in ac_series_codes_set,
-        'Tee-Bar (MK -15)': lambda c: normalize_filter_code(c) in teebarmk15_codes_set,
-        'Tee-Bar (MK -24)': lambda c: normalize_filter_code(c) in teebarmk24_codes_set,
-        'Tee-Bar(New Colour)1': lambda c: normalize_filter_code(c) in teebarnewcolour1_codes_set,
-        'SCREW': lambda c: normalize_filter_code(c) in screw_codes_set,
+        'AllBoard': lambda item: normalize_code(item.get('code', '')) in bd_series_codes_set,
+        'TaishanBoard': lambda item: normalize_code(item.get('code', '')) in taishan_board_codes_set,
+        'Board- Fibre Cement': lambda item: normalize_filter_code(item.get('code', '')) in fibre_cement_codes_set,
+        'Allwool': lambda item: normalize_code(item.get('code', '')) in ac_series_codes_set,
+        'Tee-Bar (MK -15)': lambda item: normalize_filter_code(item.get('code', '')) in teebarmk15_codes_set,
+        'Tee-Bar (MK -24)': lambda item: (
+            normalize_filter_code(item.get('code', '')) in teebarmk24_codes_set
+            or item.get('category', '') == 'Tee-Bar (MK -24)'
+        ),
+        'Tee-Bar(New Colour)1': lambda item: normalize_filter_code(item.get('code', '')) in teebarnewcolour1_codes_set,
+        'SCREW': lambda item: normalize_filter_code(item.get('code', '')) in screw_codes_set,
     }
     CHIP_SPECIAL_CATEGORIES = list(CODE_BASED_FILTERS.keys())
 
@@ -769,7 +814,7 @@ def index():
             match_fn = CODE_BASED_FILTERS[cat_decoded]
             inventory_data = {
                 num: item for num, item in inventory_data.items()
-                if match_fn(item.get('code', ''))
+                if match_fn(item)
             }
         else:
             # E列のカテゴリと直接比較
@@ -842,7 +887,7 @@ def index():
     # コードベース特殊カテゴリの件数を計算
     all_inventory = platform.get_inventory_data()
     for cat_name, match_fn in CODE_BASED_FILTERS.items():
-        count = sum(1 for item in all_inventory.values() if match_fn(item.get('code', '')))
+        count = sum(1 for item in all_inventory.values() if match_fn(item))
         if count > 0:
             canon_counts[cat_name] = count
     
@@ -1858,6 +1903,25 @@ def api_inventory():
     """在庫データAPI"""
     inventory_data = platform.get_inventory_data()
     return jsonify(inventory_data)
+
+@app.route('/api/summary-peek')
+def api_summary_peek():
+    """InventorySummaryReport の指定コード確認（診断用）"""
+    codes = request.args.get('codes', 'TNIA2432I0800MK,BD-060').split(',')
+    platform._inventory_cache = None
+    summary = platform._fetch_inventory_summary_by_code()
+    out = {}
+    for raw in codes:
+        raw = raw.strip()
+        if not raw:
+            continue
+        key = platform._normalize_product_code_key(raw)
+        out[raw] = {
+            'normalized': key,
+            'exact': summary.get(key),
+            'lookup': platform._lookup_summary_row(summary, raw),
+        }
+    return jsonify({'summary_count': len(summary), 'codes': out})
 
 @app.route('/api/product/<int:product_number>')
 def api_product(product_number):

@@ -15,6 +15,43 @@ import time
 
 app = Flask(__name__)
 
+# コードベース特殊カテゴリ（index フィルターと Summary 行のカテゴリ推定で共用）
+TEEBARMK15_CODE_SET = {
+    'TNMA1532M3000MK', 'TNMC1525M0600MK', 'TNMC1525M1200MK',
+}
+TEEBARMK24_CODE_SET = {
+    'TNIA2432I0800MK', 'TNIA2432I1000MK', 'TNIC2425I0200MK', 'TNIC2425I0400MK',
+    'TNIL2025I0800MK', 'TNIL2025I1000MK', 'TNMA2432M2400MK', 'TNMA2432M3000H200MK',
+    'TNMA2432M3000H500MK', 'TNMA2432M3000MK', 'TNMC2425M0500MK', 'TNMC2425M0600MK',
+    'TNMC2425M1000MK', 'TNMC2425M1200MK',
+}
+TEEBARNEWCOLOUR1_CODE_SET = {'TNIW2020I1000N1'}
+SCREW_CODE_SET = {
+    'SW-002', 'SW-003', 'SW-003B', 'SW-005', 'SW-008', 'SW-009', 'SW-009B', 'SW-010',
+    'SW-011', 'SW-012', 'SW-018', 'SW-020', 'SW-028', 'SW-030', 'SW-031', 'SW-032',
+    'SW-033', 'SW-039C', 'SW-039S', 'SW-040B', 'SW-041', 'SW-044', 'SW-048', 'SW-049',
+    'SW-050', 'SW-063', 'SW-065', 'SW-068',
+}
+FIBRE_CEMENT_CODE_SET = {
+    'FC-003', 'FC-006', 'FC-014', 'FC-015', 'FC-036', 'FC-043', 'FC-044',
+    'FC-046', 'FC-052', 'FC-055',
+}
+
+
+def infer_category_from_code_key(code_key: str) -> str:
+    if code_key in TEEBARMK15_CODE_SET:
+        return 'Tee-Bar (MK -15)'
+    if code_key in TEEBARMK24_CODE_SET:
+        return 'Tee-Bar (MK -24)'
+    if code_key in TEEBARNEWCOLOUR1_CODE_SET:
+        return 'Tee-Bar(New Colour)1'
+    if code_key in SCREW_CODE_SET:
+        return 'SCREW'
+    if code_key in FIBRE_CEMENT_CODE_SET:
+        return 'Board- Fibre Cement'
+    return ''
+
+
 class KiriiInventoryPlatform:
     def __init__(self):
         # Googleシート設定
@@ -262,6 +299,7 @@ class KiriiInventoryPlatform:
                 if quantity is None:
                     quantity = 0
                 entry = {
+                    'description': str(row[1] if len(row) > 1 else '').strip(),
                     'on_hand': on_hand,
                     'without_dn': without_dn,
                     'quantity': quantity,
@@ -423,7 +461,38 @@ class KiriiInventoryPlatform:
                 except (ValueError, IndexError) as e:
                     print(f"⚠️ 行データ処理エラー: {e}")
                     continue
-            
+
+            # Stock に無く InventorySummaryReport にのみ存在する製品を追加（例: SW-002）
+            stock_code_keys = {
+                self._normalize_product_code_key(v.get('code', ''))
+                for v in inventory_data.values()
+            }
+            for code_key, summ in summary_by_code.items():
+                if not code_key or code_key in stock_code_keys:
+                    continue
+                has_qty = (
+                    (summ.get('on_hand') or 0) != 0
+                    or (summ.get('without_dn') or 0) != 0
+                    or (summ.get('quantity') or 0) != 0
+                )
+                if not has_qty and not summ.get('description'):
+                    continue
+                number = next_auto_number
+                next_auto_number += 1
+                inventory_data[number] = {
+                    'code': code_key,
+                    'name': summ.get('description') or code_key,
+                    'location': '0',
+                    'quantity': summ.get('quantity') or 0,
+                    'on_hand': summ.get('on_hand'),
+                    'without_dn': summ.get('without_dn'),
+                    'unit': '支',
+                    'updated': datetime.now().strftime('%Y-%m-%d'),
+                    'category': infer_category_from_code_key(code_key),
+                    'category_detail': summ.get('description') or '',
+                }
+                stock_code_keys.add(code_key)
+
             if inventory_data:
                 print(f"✅ Googleシートから{len(inventory_data)}件のデータを取得")
                 return inventory_data

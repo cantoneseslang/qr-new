@@ -608,22 +608,51 @@ def index():
 
     # BDシリーズとFCシリーズの製品コードリスト
     bd_series_codes = [
-        'BD-011', 'BD-024', 'BD-030', 'BD-043', 'BD-045-MN', 'BD-048-MN', 'BD-049', 
-        'BD-050-MN', 'BD-051', 'BD-052', 'BD-053', 'BD-054', 'BD-055-M', 'BD-056-M', 
+        'BD-011', 'BD-024', 'BD-030', 'BD-043', 'BD-045-MN', 'BD-048-MN', 'BD-049',
+        'BD-050-MN', 'BD-051', 'BD-052', 'BD-053', 'BD-054', 'BD-055-M', 'BD-056-M',
         'BD-057', 'BD-059', 'BD-060', 'BD-061', 'BD-062', 'BD-063', 'BD-064', 'BD-065', 'BD-067',
-        'FC-003', 'FC-006', 'FC-007', 'FC-008', 'FC-014', 'FC-015', 'FC-036', 'FC-041', 
-        'FC-043', 'FC-044', 'FC-046', 'FC-049', 'FC-052', 'FC-053', 'FC-055', 'FC-056', 'FC-057', 'FC-059'
+        'FC-003', 'FC-006', 'FC-007', 'FC-008', 'FC-014', 'FC-015', 'FC-036', 'FC-041',
+        'FC-043', 'FC-044', 'FC-046', 'FC-049', 'FC-052', 'FC-053', 'FC-055', 'FC-056', 'FC-057', 'FC-059',
     ]
 
-    # TaishanBoard対象の製品コード（ユーザー提供リスト）
-    taishan_board_codes = [
-        'BD-060', 'BD-061', 'BD-062', 'BD-063', 'BD-064', 'BD-065', 'BD-067'
+    # Board- Fibre Cement 対象の製品コード
+    fibre_cement_codes = [
+        'FC-003', 'FC-006', 'FC-014', 'FC-015', 'FC-036', 'FC-043', 'FC-044',
+        'FC-046', 'FC-052', 'FC-055',
     ]
-    
+
+    # TaishanBoard対象の製品コード
+    taishan_board_codes = [
+        'BD-060', 'BD-061', 'BD-062', 'BD-063', 'BD-064', 'BD-065', 'BD-067',
+        'FC-056', 'FC-059', 'FC-066',
+    ]
+
     # ACシリーズの製品コードリスト
     ac_series_codes = [
         'AC-204', 'AC-212', 'AC-215',
         'AC-260', 'AC-261', 'AC-262', 'AC-269', 'AC-270'
+    ]
+
+    teebarmk15_codes = [
+        'TNMA1532M3000MK', 'TNMC1525M0600MK', 'TNMC1525M1200MK',
+    ]
+
+    teebarmk24_codes = [
+        'TNIA2432I0800MK', 'TNIA2432I1000MK', 'TNIC2425I0200MK', 'TNIC2425I0400MK',
+        'TNIL2025I0800MK', 'TNIL2025I1000MK', 'TNMA2432M2400MK', 'TNMA2432M3000H200MK',
+        'TNMA2432M3000H500MK', 'TNMA2432M3000MK', 'TNMC2425M0500MK', 'TNMC2425M0600MK',
+        'TNMC2425M1000MK', 'TNMC2425M1200MK',
+    ]
+
+    teebarnewcolour1_codes = [
+        'TNIW2020I1000N1',
+    ]
+
+    screw_codes = [
+        'SW-002', 'SW-003', 'SW-003B', 'SW-005', 'SW-008', 'SW-009', 'SW-009B', 'SW-010',
+        'SW-011', 'SW-012', 'SW-018', 'SW-020', 'SW-028', 'SW-030', 'SW-031', 'SW-032',
+        'SW-033', 'SW-039C', 'SW-039S', 'SW-040B', 'SW-041', 'SW-044', 'SW-048', 'SW-049',
+        'SW-050', 'SW-063', 'SW-065', 'SW-068',
     ]
 
     def normalize_code(code: str) -> str:
@@ -636,11 +665,36 @@ def index():
         if m:
             prefix, number, suffix = m.group(1), m.group(2), m.group(3)
             return f"{prefix}-{number}" + (f"-{suffix}" if suffix else '')
-        return s
+        return re.sub(r'\s+', '', s)
+
+    def normalize_filter_code(code: str) -> str:
+        if not code:
+            return ''
+        import re
+        s = str(code).strip().upper()
+        s = re.sub(r'[－ー−–—]', '-', s)
+        return re.sub(r'\s+', '', s)
 
     bd_series_codes_set = {normalize_code(c) for c in bd_series_codes}
+    fibre_cement_codes_set = {normalize_filter_code(c) for c in fibre_cement_codes}
     ac_series_codes_set = {normalize_code(c) for c in ac_series_codes}
     taishan_board_codes_set = {normalize_code(c) for c in taishan_board_codes}
+    teebarmk15_codes_set = {normalize_filter_code(c) for c in teebarmk15_codes}
+    teebarmk24_codes_set = {normalize_filter_code(c) for c in teebarmk24_codes}
+    teebarnewcolour1_codes_set = {normalize_filter_code(c) for c in teebarnewcolour1_codes}
+    screw_codes_set = {normalize_filter_code(c) for c in screw_codes}
+
+    CODE_BASED_FILTERS = {
+        'AllBoard': lambda c: normalize_code(c) in bd_series_codes_set,
+        'TaishanBoard': lambda c: normalize_code(c) in taishan_board_codes_set,
+        'Board- Fibre Cement': lambda c: normalize_filter_code(c) in fibre_cement_codes_set,
+        'Allwool': lambda c: normalize_code(c) in ac_series_codes_set,
+        'Tee-Bar (MK -15)': lambda c: normalize_filter_code(c) in teebarmk15_codes_set,
+        'Tee-Bar (MK -24)': lambda c: normalize_filter_code(c) in teebarmk24_codes_set,
+        'Tee-Bar(New Colour)1': lambda c: normalize_filter_code(c) in teebarnewcolour1_codes_set,
+        'SCREW': lambda c: normalize_filter_code(c) in screw_codes_set,
+    }
+    CHIP_SPECIAL_CATEGORIES = list(CODE_BASED_FILTERS.keys())
 
     # cat変数をデコードして統一
     from urllib.parse import unquote
@@ -648,23 +702,11 @@ def index():
     print(f"🔍 DEBUG: cat='{cat}', cat_decoded='{cat_decoded}'")  # デバッグ用
     
     if cat_decoded:
-        # AllBoardフィルターの特別処理
-        if cat_decoded == 'AllBoard':
+        if cat_decoded in CODE_BASED_FILTERS:
+            match_fn = CODE_BASED_FILTERS[cat_decoded]
             inventory_data = {
                 num: item for num, item in inventory_data.items()
-                if normalize_code(item.get('code', '')) in bd_series_codes_set
-            }
-        # TaishanBoardフィルターの特別処理
-        elif cat_decoded == 'TaishanBoard':
-            inventory_data = {
-                num: item for num, item in inventory_data.items()
-                if normalize_code(item.get('code', '')) in taishan_board_codes_set
-            }
-        # Allwoolフィルターの特別処理
-        elif cat_decoded == 'Allwool':
-            inventory_data = {
-                num: item for num, item in inventory_data.items()
-                if normalize_code(item.get('code', '')) in ac_series_codes_set
+                if match_fn(item.get('code', ''))
             }
         else:
             # E列のカテゴリと直接比較
@@ -734,34 +776,27 @@ def index():
     canon_counts = Counter(valid_categories)
     print(f"🔍 カテゴリ集計: {dict(canon_counts)}")  # デバッグ用
     
-    # AllBoardカテゴリの件数を計算
+    # コードベース特殊カテゴリの件数を計算
     all_inventory = platform.get_inventory_data()
-    bd_count = sum(1 for item in all_inventory.values() if normalize_code(item.get('code', '')) in bd_series_codes_set)
-    if bd_count > 0:
-        canon_counts['AllBoard'] = bd_count
-    
-    # TaishanBoardカテゴリの件数を計算
-    taishan_count = sum(1 for item in all_inventory.values() if normalize_code(item.get('code', '')) in taishan_board_codes_set)
-    if taishan_count > 0:
-        canon_counts['TaishanBoard'] = taishan_count
-
-    # Allwoolカテゴリの件数を計算
-    ac_count = sum(1 for item in all_inventory.values() if normalize_code(item.get('code', '')) in ac_series_codes_set)
-    if ac_count > 0:
-        canon_counts['Allwool'] = ac_count
+    for cat_name, match_fn in CODE_BASED_FILTERS.items():
+        count = sum(1 for item in all_inventory.values() if match_fn(item.get('code', '')))
+        if count > 0:
+            canon_counts[cat_name] = count
     
     # E列の値をそのまま使用するため、変換マッピングは不要
 
     # E列の実際の値に基づく順序（ユーザー指定の順序）
     predefined_order = [
-        'AllBoard', 'TaishanBoard', 'Allwool', '50mm Runner', '50mm Stud', '2-1/2" Runner', '51mm Runner',
+        'AllBoard', 'TaishanBoard', 'Board- Fibre Cement', 'Allwool',
+        'Tee-Bar (MK -15)', 'Tee-Bar (MK -24)', 'Tee-Bar(New Colour)1', 'SCREW',
+        '50mm Runner', '50mm Stud', '2-1/2" Runner', '51mm Runner',
         '51mm Stud', '64mm Runner', '64mm Stud', '75mm Runner', '75mm Stud', '76mm Runner',
         '76mm Stud', '86mm Runner', '86mm Stud', '92mm Runner', '92mm Stud',
         '100mm Runner', '100mm Stud', '102mm Runner', '102mm Stud', '125mm Runner', '125mm Stud',
         '127mm Runner', '127mm Stud', '150mm Runner', '150mm Stud', '152mm Runner', '152mm Stud',
-        'Accessories', 'Board- Fibre Cement', 'Board- GWB (GypRoc)', 'Board- Macau',
-        'Ceiling System HD-25', 'Ceiling System SD-19', 'Metal Angle', 'SCREW', 'Tee-Bar (MK -15)',
-        'Tee-Bar (MK -24)', 'Tee-Bar(New Colour)1', 'U-Channel', 'Venetian (ASTM-G90)', 'Z-MK', 'Access Panel'
+        'Accessories', 'Board- GWB (GypRoc)', 'Board- Macau',
+        'Ceiling System HD-25', 'Ceiling System SD-19', 'Metal Angle',
+        'U-Channel', 'Venetian (ASTM-G90)', 'Z-MK', 'Access Panel'
     ]
     
     # 既存のカテゴリを指定順に並べる
@@ -1074,12 +1109,27 @@ def index():
                 {% if 'TaishanBoard' in canon_counts %}
                 <a class="chip {{ 'active' if cat_decoded=='TaishanBoard' else '' }}" href="/?cat=TaishanBoard">TaishanBoard<span class="chip-count">{{ canon_counts.get('TaishanBoard', 0) }}</span></a>
                 {% endif %}
+                {% if 'Board- Fibre Cement' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Board- Fibre Cement' else '' }}" href="/?cat={{ 'Board- Fibre Cement' | urlencode }}">Board- Fibre Cement<span class="chip-count">{{ canon_counts.get('Board- Fibre Cement', 0) }}</span></a>
+                {% endif %}
                 {% if 'Allwool' in canon_counts %}
                 <a class="chip {{ 'active' if cat_decoded=='Allwool' else '' }}" href="/?cat=Allwool">Allwool<span class="chip-count">{{ canon_counts.get('Allwool', 0) }}</span></a>
                 {% endif %}
+                {% if 'Tee-Bar (MK -15)' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Tee-Bar (MK -15)' else '' }}" href="/?cat={{ 'Tee-Bar (MK -15)' | urlencode }}">Tee-Bar (MK -15)<span class="chip-count">{{ canon_counts.get('Tee-Bar (MK -15)', 0) }}</span></a>
+                {% endif %}
+                {% if 'Tee-Bar (MK -24)' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Tee-Bar (MK -24)' else '' }}" href="/?cat={{ 'Tee-Bar (MK -24)' | urlencode }}">Tee-Bar (MK -24)<span class="chip-count">{{ canon_counts.get('Tee-Bar (MK -24)', 0) }}</span></a>
+                {% endif %}
+                {% if 'Tee-Bar(New Colour)1' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Tee-Bar(New Colour)1' else '' }}" href="/?cat={{ 'Tee-Bar(New Colour)1' | urlencode }}">Tee-Bar(New Colour)1<span class="chip-count">{{ canon_counts.get('Tee-Bar(New Colour)1', 0) }}</span></a>
+                {% endif %}
+                {% if 'SCREW' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='SCREW' else '' }}" href="/?cat=SCREW">SCREW<span class="chip-count">{{ canon_counts.get('SCREW', 0) }}</span></a>
+                {% endif %}
                 <button class="more-btn" onclick="openSheet()">More</button>
                 {% for c in top_categories %}
-                {% if c != 'AllBoard' and c != 'TaishanBoard' and c != 'Allwool' %}
+                {% if c not in chip_special_categories %}
                 <a class="chip {{ 'active' if cat_decoded==c else '' }}" href="/?cat={{ c | urlencode }}">{{ c }}<span class="chip-count">{{ canon_counts.get(c, 0) }}</span></a>
                 {% endif %}
                 {% endfor %}
@@ -1355,7 +1405,8 @@ def index():
     cat_decoded=cat_decoded,
     top_categories=top_categories_canon,
     canon_counts=canon_counts,
-    ordered_cnt=ordered_cnt
+    ordered_cnt=ordered_cnt,
+    chip_special_categories=CHIP_SPECIAL_CATEGORIES
     )
 
 @app.route('/product/<int:product_number>')

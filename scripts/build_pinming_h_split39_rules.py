@@ -9,11 +9,24 @@ from pathlib import Path
 import pandas as pd
 
 DEFAULT_XLSX = Path(r"C:\Users\Satoshi\Downloads\pinming-h-split39.xlsx")
+DEFAULT_CSV = Path(r"C:\Users\Satoshi\Downloads\pinming-39-list.csv")
 DEFAULT_OUT = Path(r"E:\sales-dashboard-2\data\pinming-h-split39-rules.json")
+DEFAULT_LIST_OUT = Path(r"E:\sales-dashboard-2\data\pinming-39-list.json")
 
 
 def norm_key(text: object) -> str:
     return re.sub(r"\s+", "", str(text)).lower()
+
+
+def build_display_list(csv_path: Path, out: Path) -> list[str]:
+    import csv as csv_mod
+
+    with csv_path.open(encoding="utf-8-sig") as f:
+        order = [row["H_品名"] for row in csv_mod.DictReader(f)]
+    payload = {"source": csv_path.name, "order": order}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return order
 
 
 def build(xlsx: Path, out: Path) -> dict:
@@ -65,10 +78,14 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", type=Path, default=DEFAULT_XLSX)
+    ap.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--list-out", type=Path, default=DEFAULT_LIST_OUT)
     args = ap.parse_args()
     payload = build(args.xlsx, args.out)
+    order = build_display_list(args.csv, args.list_out)
     print(f"Wrote {args.out}")
+    print(f"Wrote {args.list_out} ({len(order)} items)")
     print("counts:", payload["meta"]["counts"])
 
 

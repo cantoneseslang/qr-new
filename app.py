@@ -5,14 +5,68 @@ QRコードからアクセスする携帯対応在庫確認システム
 Googleシート連携対応
 """
 
-from flask import Flask, render_template_string, jsonify, request, redirect, abort
+from flask import Flask, render_template_string, jsonify, request, redirect, abort, Response
 from urllib.parse import unquote, urlparse
 import json
 from datetime import datetime
 import os
+import csv
+import io
 import requests
+import time
 
 app = Flask(__name__)
+
+# コードベース特殊カテゴリ（index フィルターと Summary 行のカテゴリ推定で共用）
+TEEBARMK15_CODE_SET = {
+    'TNMA1532M3000MK', 'TNMC1525M0600MK', 'TNMC1525M1200MK',
+}
+TEEBARMK24_CODE_SET = {
+    'TNIA2432I0800MK', 'TNIA2432I1000MK', 'TNIC2425I0200MK', 'TNIC2425I0400MK',
+    'TNIL2025I0800MK', 'TNIL2025I1000MK', 'TNMA2432M2400MK', 'TNMA2432M3000H200MK',
+    'TNMA2432M3000H500MK', 'TNMA2432M3000MK', 'TNMC2425M0500MK', 'TNMC2425M0600MK',
+    'TNMC2425M1000MK', 'TNMC2425M1200MK',
+}
+TEEBARNEWCOLOUR1_CODE_SET = {'TNIW2020I1000N1'}
+SCREW_CODE_SET = {
+    'SW-002', 'SW-003', 'SW-003B', 'SW-005', 'SW-008', 'SW-009', 'SW-009B', 'SW-010',
+    'SW-011', 'SW-012', 'SW-018', 'SW-020', 'SW-028', 'SW-030', 'SW-031', 'SW-032',
+    'SW-033', 'SW-039C', 'SW-039S', 'SW-040B', 'SW-041', 'SW-044', 'SW-048', 'SW-049',
+    'SW-050', 'SW-063', 'SW-065', 'SW-068',
+}
+FIBRE_CEMENT_CODE_SET = {
+    'FC-003', 'FC-006', 'FC-014', 'FC-015', 'FC-036', 'FC-043', 'FC-044',
+    'FC-046', 'FC-052', 'FC-055',
+}
+
+# === カテゴリフィルター鉄ルール: 順序・名称変更禁止（docs/CATEGORY_FILTER_IRON_RULES.md） ===
+CATEGORY_PREDEFINED_ORDER = [
+    'AllBoard', 'TaishanBoard', 'Board- Fibre Cement', 'Allwool',
+    'Tee-Bar (MK -15)', 'Tee-Bar (MK -24)', 'Tee-Bar(New Colour)1', 'SCREW',
+    '50mm Runner', '50mm Stud', '2-1/2" Runner', '51mm Runner',
+    '51mm Stud', '64mm Runner', '64mm Stud', '75mm Runner', '75mm Stud', '76mm Runner',
+    '76mm Stud', '86mm Runner', '86mm Stud', '92mm Runner', '92mm Stud',
+    '100mm Runner', '100mm Stud', '102mm Runner', '102mm Stud', '125mm Runner', '125mm Stud',
+    '127mm Runner', '127mm Stud', '150mm Runner', '150mm Stud', '152mm Runner', '152mm Stud',
+    'Accessories', 'Board- GWB (GypRoc)', 'Board- Macau',
+    'Ceiling System HD-25', 'Ceiling System SD-19', 'Metal Angle',
+    'U-Channel', 'Venetian (ASTM-G90)', 'Z-MK', 'Access Panel',
+]
+
+
+def infer_category_from_code_key(code_key: str) -> str:
+    if code_key in TEEBARMK15_CODE_SET:
+        return 'Tee-Bar (MK -15)'
+    if code_key in TEEBARMK24_CODE_SET:
+        return 'Tee-Bar (MK -24)'
+    if code_key in TEEBARNEWCOLOUR1_CODE_SET:
+        return 'Tee-Bar(New Colour)1'
+    if code_key in SCREW_CODE_SET:
+        return 'SCREW'
+    if code_key in FIBRE_CEMENT_CODE_SET:
+        return 'Board- Fibre Cement'
+    return ''
+
 
 class KiriiInventoryPlatform:
     def __init__(self):
@@ -27,8 +81,10 @@ class KiriiInventoryPlatform:
         self.html = html
         self.re = re
         self.use_google_sheets = bool(self.sheet_url)
-        
-        
+        self._inventory_cache = None
+        self._inventory_cache_at = 0.0
+        self._adjust_cache = None
+        self._adjust_cache_at = 0.0
         # Googleシート接続を初期化
         self.sheet_client = None
         self.worksheet = None
@@ -84,17 +140,20 @@ class KiriiInventoryPlatform:
                 
             # サービスアカウント認証（環境変数からJSONキーを取得）
             self.sheets_service = None
+            self.credentials = None
+            self.write_credentials = None
+            self.sheets_write_service = None
             self.api_key = None
             
             # 環境変数からサービスアカウントJSONを取得
             service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
             print(f"🔍 デバッグ: サービスアカウントJSON設定済み = {bool(service_account_json)}")
             if service_account_json:
-                print(f"🔍 デバッグ: サービスアカウントJSON内容 = {service_account_json[:100]}...")
+                print("🔍 デバッグ: サービスアカウントJSON内容 = [REDACTED]")
                 try:
                     # 依存が無い環境でも動作するよう遅延インポート
                     from google.oauth2 import service_account  # type: ignore
-                    from googleapiclient.discovery import build  # type: ignore
+                    from google.auth.transport.requests import Request  # type: ignore
                     import json
 
                     # JSON文字列をパース
@@ -105,28 +164,44 @@ class KiriiInventoryPlatform:
                         service_account_info,
                         scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
                     )
-                    self.sheets_service = build('sheets', 'v4', credentials=credentials)
-                    print("✅ サービスアカウント認証成功")
+                    credentials.refresh(Request())
+                    self.credentials = credentials
+                    write_credentials = service_account.Credentials.from_service_account_info(
+                        service_account_info,
+                        scopes=['https://www.googleapis.com/auth/spreadsheets']
+                    )
+                    write_credentials.refresh(Request())
+                    self.write_credentials = write_credentials
+                    try:
+                        from googleapiclient.discovery import build  # type: ignore
+                        self.sheets_write_service = build('sheets', 'v4', credentials=write_credentials)
+                    except Exception as write_build_err:
+                        print(f"⚠️ Sheets書込サービス初期化失敗: {write_build_err}")
+                    print("✅ サービスアカウント認証成功（読取/書込）")
                 except Exception as e:
                     print(f"⚠️ サービスアカウント認証失敗: {e}")
                     print("📋 API Key方式にフォールバック")
-                    self.api_key = "AIzaSyDIZ8mvJJiuds4YAtlpfLlB3x9-gSSGeNA"
+                    self.api_key = os.getenv('GOOGLE_SHEETS_API_KEY', '').strip()
             else:
                 print("⚠️ サービスアカウントJSONが設定されていません")
                 print("📋 API Key方式を使用します")
-                self.api_key = "AIzaSyDIZ8mvJJiuds4YAtlpfLlB3x9-gSSGeNA"
+                self.api_key = os.getenv('GOOGLE_SHEETS_API_KEY', '').strip()
             
             # Google Sheets API接続テスト
-            if self.sheets_service:
+            if self.credentials:
                 # サービスアカウント認証での接続テスト
                 try:
                     print(f"🔍 デバッグ: サービスアカウント認証で接続テスト開始")
                     print(f"🔍 デバッグ: シートID = {self.sheet_id}")
                     print(f"🔍 デバッグ: 範囲 = Stock!A1:Y1")
-                    result = self.sheets_service.spreadsheets().values().get(
-                        spreadsheetId=self.sheet_id,
-                        range='Stock!A1:Y1'
-                    ).execute()
+                    test_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1"
+                    result_response = requests.get(
+                        test_url,
+                        headers={'Authorization': f'Bearer {self.credentials.token}'},
+                        timeout=10
+                    )
+                    result_response.raise_for_status()
+                    result = result_response.json()
                     print(f"✅ Googleシート接続成功 (サービスアカウント認証) (ID: {self.sheet_id[:8]}...)")
                     print(f"🔍 デバッグ: 取得データ = {result}")
                     self.use_google_sheets = True
@@ -137,8 +212,8 @@ class KiriiInventoryPlatform:
                     self.use_google_sheets = False
             elif self.api_key:
                 # API Key認証での接続テスト
-                test_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1?key={self.api_key}"
-                test_response = requests.get(test_url, timeout=10)
+                test_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1"
+                test_response = requests.get(test_url, params={'key': self.api_key}, timeout=10)
                 
                 if test_response.status_code == 200:
                     print(f"✅ Googleシート接続成功 (API Key認証) (ID: {self.sheet_id[:8]}...)")
@@ -165,11 +240,488 @@ class KiriiInventoryPlatform:
             pass
         return None
 
+    def _get_sheet_values(self, sheet_range):
+        """Google Sheets API から指定範囲の値を取得"""
+        import requests
+        api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/{sheet_range}"
+        if self.credentials:
+            if not self.credentials.valid:
+                from google.auth.transport.requests import Request  # type: ignore
+                self.credentials.refresh(Request())
+            response = requests.get(
+                api_url,
+                headers={'Authorization': f'Bearer {self.credentials.token}'},
+                timeout=15,
+            )
+        else:
+            response = requests.get(api_url, params={'key': self.api_key}, timeout=15)
+        response.raise_for_status()
+        return response.json().get('values', [])
+
+    @staticmethod
+    def _parse_sheet_quantity(value):
+        """シート数量を整数化（1,189.00 等の小数・カンマ対応）"""
+        if value is None or value == '':
+            return None
+        s = str(value).replace(',', '').strip()
+        if not s or s.startswith('#'):
+            return None
+        try:
+            return int(round(float(s)))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_product_code_key(code):
+        import re
+        s = str(code or '').strip().upper()
+        s = re.sub(r"[|'\"`]", '', s)
+        s = re.sub(r'[‐‑‒–—―ー]', '-', s)
+        s = re.sub(r'\s+', '', s)
+        s = re.sub(r'[^A-Z0-9-]', '', s)
+        m = re.match(r'^([A-Z]{1,4})-([0-9O]+)$', s)
+        if m:
+            s = f"{m[1]}-{m[2].replace('O', '0')}"
+        if s == 'GSC08I11000B':
+            s = 'GSC08I1000B'
+        return s
+
+    def _lookup_summary_row(self, summary_by_code, code):
+        """Summary行を製品コードで検索（完全一致→OCRゆれフォールバック）"""
+        code_key = self._normalize_product_code_key(code)
+        hit = summary_by_code.get(code_key)
+        if hit:
+            return hit
+
+        # I/1, O/0 等のOCRゆれを許容
+        variants = {code_key}
+        variants.add(code_key.replace('I', '1').replace('O', '0'))
+        variants.add(code_key.replace('1', 'I').replace('0', 'O'))
+        for v in variants:
+            if v in summary_by_code:
+                return summary_by_code[v]
+
+        if len(code_key) >= 8:
+            prefix = code_key[:6]
+            candidates = [
+                (k, v) for k, v in summary_by_code.items()
+                if k.startswith(prefix) and abs(len(k) - len(code_key)) <= 2
+            ]
+            if len(candidates) == 1:
+                return candidates[0][1]
+        return None
+
+    def _fetch_inventory_summary_by_code(self):
+        """Gmail同期先 InventorySummaryReport を製品コード索引に変換"""
+        summary = {}
+        try:
+            rows = self._get_sheet_values('InventorySummaryReport!A2:E5000')
+            for row in rows:
+                if not row or not str(row[0]).strip():
+                    continue
+                code_key = self._normalize_product_code_key(row[0])
+                if not code_key:
+                    continue
+                on_hand = self._parse_sheet_quantity(row[2] if len(row) > 2 else '')
+                without_dn = self._parse_sheet_quantity(row[3] if len(row) > 3 else '')
+                quantity = self._parse_sheet_quantity(row[4] if len(row) > 4 else '')
+                if quantity is None:
+                    quantity = 0
+                entry = {
+                    'description': str(row[1] if len(row) > 1 else '').strip(),
+                    'on_hand': on_hand,
+                    'without_dn': without_dn,
+                    'quantity': quantity,
+                }
+                prev = summary.get(code_key)
+                if prev is None or quantity > (prev.get('quantity') or 0):
+                    summary[code_key] = entry
+            print(f"✅ InventorySummaryReport {len(summary)}件を読込")
+        except Exception as e:
+            print(f"⚠️ InventorySummaryReport取得エラー: {e}")
+        return summary
+
+    def get_stocktake_snapshot(self):
+        """StocktakeSnapshot シートから盤點表データを取得"""
+        try:
+            values = self._get_sheet_values('StocktakeSnapshot!A1:I2000')
+        except Exception as e:
+            print(f"⚠️ StocktakeSnapshot取得エラー: {e}")
+            return {'meta': {}, 'rows': [], 'error': str(e)}
+
+        if not values or len(values) < 2:
+            return {'meta': {}, 'rows': []}
+
+        meta_row = values[0]
+
+        meta = {
+            'report_date': meta_row[0] if len(meta_row) > 0 else '',
+            'report_time': meta_row[1] if len(meta_row) > 1 else '',
+            'product_count': meta_row[2] if len(meta_row) > 2 else '',
+            'source_email_at': meta_row[3] if len(meta_row) > 3 else '',
+            'script_version': meta_row[4] if len(meta_row) > 4 else '',
+            'company': 'KIRII (HONG KONG) LIMITED',
+            'title': 'Inventory Summary Report',
+        }
+
+        rows = []
+        for row in values[2:]:
+            padded = row + [''] * (9 - len(row))
+            rows.append({
+                'row_type': padded[0],
+                'category': padded[1],
+                'sub_category': padded[2],
+                'product_code': padded[3],
+                'description': padded[4],
+                'on_hand': padded[5],
+                'sc_wo_dn': padded[6],
+                'available': padded[7],
+                'adjust': padded[8],
+            })
+        return {'meta': meta, 'rows': rows}
+
+    def get_stocktake_adjust_by_code(self):
+        """StocktakeSnapshot の Adjust 列を product_code キー辞書で返す"""
+        if self._adjust_cache is not None and time.time() - self._adjust_cache_at < 60:
+            return self._adjust_cache
+
+        adjust_map = {}
+        snapshot = self.get_stocktake_snapshot()
+        for row in snapshot.get('rows', []):
+            if row.get('row_type') != 'product':
+                continue
+            code = str(row.get('product_code', '') or '').strip()
+            adj = str(row.get('adjust', '') or '').strip()
+            if not code or not adj:
+                continue
+            adjust_map[self._normalize_product_code_key(code)] = adj
+
+        self._adjust_cache = adjust_map
+        self._adjust_cache_at = time.time()
+        return adjust_map
+
+    def _lookup_adjust(self, adjust_by_code, code):
+        """Adjust 値を製品コードで検索（StocktakeSnapshot 専用）"""
+        code_key = self._normalize_product_code_key(code)
+        if code_key in adjust_by_code:
+            return adjust_by_code[code_key]
+
+        variants = {
+            code_key.replace('I', '1').replace('O', '0'),
+            code_key.replace('1', 'I').replace('0', 'O'),
+        }
+        for v in variants:
+            if v in adjust_by_code:
+                return adjust_by_code[v]
+        return ''
+
+    def attach_adjust_to_inventory(self, inventory_data):
+        """Stock 由来の在庫データに StocktakeSnapshot の Adjust を付与"""
+        adjust_by_code = self.get_stocktake_adjust_by_code()
+        for item in inventory_data.values():
+            item['adjust'] = self._lookup_adjust(adjust_by_code, item.get('code', ''))
+        return inventory_data
+
+    HISTORY_INDEX_SHEET = 'StocktakeHistoryIndex'
+    HISTORY_DATA_SHEET = 'StocktakeHistoryData'
+
+    def _ensure_sheet_tab(self, title):
+        """書込用シートタブが無ければ作成"""
+        if not getattr(self, 'sheets_write_service', None):
+            return False
+        try:
+            meta = self.sheets_write_service.spreadsheets().get(
+                spreadsheetId=self.sheet_id
+            ).execute()
+            titles = {s['properties']['title'] for s in meta.get('sheets', [])}
+            if title in titles:
+                return True
+            self.sheets_write_service.spreadsheets().batchUpdate(
+                spreadsheetId=self.sheet_id,
+                body={'requests': [{'addSheet': {'properties': {'title': title}}}]}
+            ).execute()
+            return True
+        except Exception as e:
+            print(f"❌ シート作成失敗 ({title}): {e}")
+            return False
+
+    def _ensure_history_sheets(self):
+        """履歴 Index / Data シートを用意し、Index ヘッダーを初期化"""
+        if not self._ensure_sheet_tab(self.HISTORY_INDEX_SHEET):
+            return False
+        if not self._ensure_sheet_tab(self.HISTORY_DATA_SHEET):
+            return False
+        try:
+            existing = self._get_sheet_values(f'{self.HISTORY_INDEX_SHEET}!A1:G1')
+            if not existing:
+                self.sheets_write_service.spreadsheets().values().update(
+                    spreadsheetId=self.sheet_id,
+                    range=f'{self.HISTORY_INDEX_SHEET}!A1:G1',
+                    valueInputOption='RAW',
+                    body={'values': [[
+                        'version_id', 'saved_at', 'report_date', 'report_time',
+                        'product_count', 'start_row', 'end_row',
+                    ]]},
+                ).execute()
+        except Exception as e:
+            print(f"⚠️ History Index ヘッダー初期化: {e}")
+        return True
+
+    def list_stocktake_history_versions(self):
+        """保存済み版の一覧（新しい順）"""
+        try:
+            values = self._get_sheet_values(f'{self.HISTORY_INDEX_SHEET}!A2:G500')
+        except Exception as e:
+            print(f"⚠️ History Index 読取: {e}")
+            return []
+        versions = []
+        for row in values or []:
+            padded = row + [''] * (7 - len(row))
+            if not padded[0]:
+                continue
+            versions.append({
+                'version_id': padded[0],
+                'saved_at': padded[1],
+                'report_date': padded[2],
+                'report_time': padded[3],
+                'product_count': padded[4],
+                'start_row': padded[5],
+                'end_row': padded[6],
+                'label': f"Date : {padded[2] or '—'} Time : {padded[3] or '—'}",
+            })
+        versions.reverse()
+        return versions
+
+    def get_stocktake_history_version(self, version_id):
+        """履歴版のフルスナップショットを取得"""
+        version_id = str(version_id or '').strip()
+        if not version_id:
+            return {'meta': {}, 'rows': [], 'error': 'missing version_id'}
+        try:
+            index_rows = self._get_sheet_values(f'{self.HISTORY_INDEX_SHEET}!A2:G500')
+        except Exception as e:
+            return {'meta': {}, 'rows': [], 'error': str(e)}
+
+        start_row = end_row = None
+        meta_info = {}
+        for row in index_rows or []:
+            padded = row + [''] * (7 - len(row))
+            if padded[0] != version_id:
+                continue
+            try:
+                start_row = int(padded[5])
+                end_row = int(padded[6])
+            except (TypeError, ValueError):
+                return {'meta': {}, 'rows': [], 'error': 'invalid row range'}
+            meta_info = {
+                'report_date': padded[2],
+                'report_time': padded[3],
+                'product_count': padded[4],
+                'saved_at': padded[1],
+                'version_id': version_id,
+                'company': 'KIRII (HONG KONG) LIMITED',
+                'title': 'Inventory Summary Report',
+            }
+            break
+        if not start_row or not end_row or end_row < start_row:
+            return {'meta': {}, 'rows': [], 'error': 'version not found'}
+
+        try:
+            values = self._get_sheet_values(
+                f'{self.HISTORY_DATA_SHEET}!A{start_row}:I{end_row}'
+            )
+        except Exception as e:
+            return {'meta': {}, 'rows': [], 'error': str(e)}
+
+        if not values:
+            return {'meta': meta_info, 'rows': [], 'error': 'empty version data'}
+
+        # block: meta, header, data...
+        data_rows = values[2:] if len(values) >= 2 else values
+        rows = []
+        for row in data_rows:
+            padded = row + [''] * (9 - len(row))
+            rows.append({
+                'row_type': padded[0],
+                'category': padded[1],
+                'sub_category': padded[2],
+                'product_code': padded[3],
+                'description': padded[4],
+                'on_hand': padded[5],
+                'sc_wo_dn': padded[6],
+                'available': padded[7],
+                'adjust': padded[8],
+            })
+        return {'meta': meta_info, 'rows': rows, 'version_id': version_id}
+
+    def _append_stocktake_history(self, snapshot, adjustments):
+        """現在スナップショット + Adjust を履歴として凍結保存。version_id を返す"""
+        if not getattr(self, 'sheets_write_service', None):
+            return None, 'write service unavailable'
+        if not self._ensure_history_sheets():
+            return None, 'history sheets unavailable'
+
+        meta = snapshot.get('meta') or {}
+        rows = snapshot.get('rows') or []
+        frozen_rows = []
+        product_count = 0
+        for row in rows:
+            item = dict(row)
+            if item.get('row_type') == 'product':
+                product_count += 1
+                code = item.get('product_code', '')
+                if code in adjustments:
+                    item['adjust'] = str(adjustments.get(code, '') or '')
+            frozen_rows.append(item)
+
+        version_id = 'v_' + datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        saved_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        report_date = meta.get('report_date', '')
+        report_time = meta.get('report_time', '')
+
+        try:
+            existing_a = self._get_sheet_values(f'{self.HISTORY_DATA_SHEET}!A:A')
+            start_row = len(existing_a or []) + 1
+        except Exception:
+            start_row = 1
+
+        block = [
+            [
+                'VERSION', version_id, saved_at, report_date, report_time,
+                str(product_count), '', '', '',
+            ],
+            [
+                'row_type', 'category', 'sub_category', 'product_code', 'description',
+                'on_hand', 'sc_wo_dn', 'available', 'adjust',
+            ],
+        ]
+        for item in frozen_rows:
+            block.append([
+                item.get('row_type', ''),
+                item.get('category', ''),
+                item.get('sub_category', ''),
+                item.get('product_code', ''),
+                item.get('description', ''),
+                item.get('on_hand', ''),
+                item.get('sc_wo_dn', ''),
+                item.get('available', ''),
+                item.get('adjust', ''),
+            ])
+        end_row = start_row + len(block) - 1
+
+        try:
+            self.sheets_write_service.spreadsheets().values().update(
+                spreadsheetId=self.sheet_id,
+                range=f'{self.HISTORY_DATA_SHEET}!A{start_row}:I{end_row}',
+                valueInputOption='RAW',
+                body={'values': block},
+            ).execute()
+            self.sheets_write_service.spreadsheets().values().append(
+                spreadsheetId=self.sheet_id,
+                range=f'{self.HISTORY_INDEX_SHEET}!A:G',
+                valueInputOption='RAW',
+                insertDataOption='INSERT_ROWS',
+                body={'values': [[
+                    version_id, saved_at, report_date, report_time,
+                    str(product_count), str(start_row), str(end_row),
+                ]]},
+            ).execute()
+            return version_id, f'history saved ({product_count} products)'
+        except Exception as e:
+            print(f"❌ History保存エラー: {e}")
+            return None, str(e)
+
+    def save_stocktake_adjustments(self, adjustments):
+        """StocktakeSnapshot の Adjust 列（I列）を更新し、フル版を履歴へ凍結"""
+        if adjustments is None or not isinstance(adjustments, dict):
+            return False, 'adjustments empty', None
+        if not getattr(self, 'sheets_write_service', None):
+            return False, 'write service unavailable', None
+
+        snapshot = self.get_stocktake_snapshot()
+        data = []
+        for idx, row in enumerate(snapshot.get('rows', [])):
+            if row.get('row_type') != 'product':
+                continue
+            code = row.get('product_code', '')
+            if code not in adjustments:
+                continue
+            sheet_row = idx + 3
+            data.append({
+                'range': f'StocktakeSnapshot!I{sheet_row}',
+                'values': [[str(adjustments[code])]]
+            })
+
+        try:
+            if data:
+                self.sheets_write_service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=self.sheet_id,
+                    body={'valueInputOption': 'USER_ENTERED', 'data': data}
+                ).execute()
+            self._adjust_cache = None
+            self._adjust_cache_at = 0.0
+        except Exception as e:
+            print(f"❌ Adjust保存エラー: {e}")
+            return False, str(e), None
+
+        version_id, hist_msg = self._append_stocktake_history(snapshot, adjustments)
+        if not version_id:
+            return False, f'adjust saved but history failed: {hist_msg}', None
+        return True, f'updated {len(data)} rows; {hist_msg}', version_id
+
+    def get_inventory_summary_rows(self):
+        """InventorySummaryReport シートを取得（Download List用）"""
+        try:
+            values = self._get_sheet_values('InventorySummaryReport!A1:G2000')
+            if not values or len(values) < 2:
+                return []
+            header = values[0]
+            rows = []
+            for row in values[1:]:
+                if not any(str(c).strip() for c in row):
+                    continue
+                padded = row + [''] * (len(header) - len(row))
+                rows.append(dict(zip(header, padded)))
+            print(f"✅ InventorySummaryReport {len(rows)}行取得")
+            return rows
+        except Exception as e:
+            print(f"⚠️ InventorySummaryReport取得エラー: {e}")
+            return []
+
+    def build_download_list_rows(self):
+        """Download List CSV 用行（ISR優先、空なら Stock から生成）"""
+        rows = self.get_inventory_summary_rows()
+        if rows:
+            return rows
+
+        inv = self.get_inventory_data()
+        if not inv:
+            return []
+
+        built = []
+        for item in inv.values():
+            built.append({
+                'Product Code': item.get('code', ''),
+                'Description': item.get('name', ''),
+                'On Hand': item.get('on_hand', ''),
+                'Quantity SC w/o DN': item.get('without_dn', ''),
+                'Available': item.get('quantity', ''),
+                'Adjust': '',
+                'Time': item.get('updated', ''),
+            })
+        return built
+
     def get_inventory_data(self):
         """在庫データを取得（Googleシートまたはローカル）"""
-        if self.use_google_sheets and (hasattr(self, 'sheets_service') or hasattr(self, 'api_key')):
+        if self._inventory_cache is not None and time.time() - self._inventory_cache_at < 60:
+            return self._inventory_cache
+
+        if self.use_google_sheets and (getattr(self, 'credentials', None) or getattr(self, 'api_key', None)):
             try:
-                return self._fetch_from_google_sheets()
+                data = self._fetch_from_google_sheets()
+                self._inventory_cache = data
+                self._inventory_cache_at = time.time()
+                return data
             except Exception as e:
                 print(f"⚠️ Googleシートからのデータ取得エラー: {e}")
                 print("📋 フォールバックデータを使用します")
@@ -182,16 +734,23 @@ class KiriiInventoryPlatform:
         import time
         
         try:
-            if self.sheets_service:
+            if self.credentials:
                 # サービスアカウント認証でのデータ取得
-                result = self.sheets_service.spreadsheets().values().get(
-                    spreadsheetId=self.sheet_id,
-                        range='Stock!A1:Y1500'
-                ).execute()
-                values = result.get('values', [])
+                if not self.credentials.valid:
+                    from google.auth.transport.requests import Request  # type: ignore
+                    self.credentials.refresh(Request())
+                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500"
+                response = requests.get(
+                    api_url,
+                    headers={'Authorization': f'Bearer {self.credentials.token}'},
+                    timeout=10
+                )
+                response.raise_for_status()
+                data = response.json()
+                values = data.get('values', [])
             else:
                 # API Key認証でのデータ取得
-                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500?key={self.api_key}"
+                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500"
                 
                 # Google Sheets APIからデータを取得（キャッシュ無効化ヘッダー付き）
                 headers = {
@@ -199,7 +758,7 @@ class KiriiInventoryPlatform:
                     'Pragma': 'no-cache',
                     'Expires': '0'
                 }
-                response = requests.get(api_url, headers=headers, timeout=10)
+                response = requests.get(api_url, params={'key': self.api_key}, headers=headers, timeout=10)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -226,6 +785,7 @@ class KiriiInventoryPlatform:
                             pass
 
             next_auto_number = max_number + 1
+            summary_by_code = self._fetch_inventory_summary_by_code()
             inventory_data = {}
             for row in rows:
                 try:
@@ -257,20 +817,24 @@ class KiriiInventoryPlatform:
                     loc_str = str(raw_loc).strip()
                     normalized_loc = '0' if (loc_str == '' or loc_str == '0') else loc_str
 
-                    # U列: On Hand（参考値）
+                    # U/V/W列: StockのVLOOKUP結果（失敗時0になるためSummaryを優先）
                     raw_on_hand = row[20] if len(row) > 20 else ''
-                    on_hand_str = str(raw_on_hand).replace(',', '').strip()
-                    on_hand = int(on_hand_str) if (on_hand_str and on_hand_str.lstrip('-').isdigit()) else None
-
-                    # V列: w/o DN（出荷未処理）
                     raw_wo = row[21] if len(row) > 21 else ''
-                    wo_str = str(raw_wo).replace(',', '').strip()
-                    without_dn = int(wo_str) if (wo_str and wo_str.lstrip('-').isdigit()) else None
+                    raw_qty = row[22] if len(row) > 22 else ''
+                    on_hand = self._parse_sheet_quantity(raw_on_hand)
+                    without_dn = self._parse_sheet_quantity(raw_wo)
+                    quantity = self._parse_sheet_quantity(raw_qty)
+                    if quantity is None:
+                        quantity = 0
 
-                    # W列: Available（在庫数量）カンマ付き・負数対応
-                    raw_qty = row[22] if len(row) > 22 else '0'
-                    qty_str = str(raw_qty).replace(',', '').strip()
-                    quantity = int(qty_str) if (qty_str and qty_str.lstrip('-').isdigit()) else 0
+                    summary = self._lookup_summary_row(summary_by_code, code_cell)
+                    if summary:
+                        if summary['on_hand'] is not None:
+                            on_hand = summary['on_hand']
+                        if summary['without_dn'] is not None:
+                            without_dn = summary['without_dn']
+                        if summary['quantity'] is not None:
+                            quantity = summary['quantity']
 
                     # X列: Unit
                     unit_val = row[23] if len(row) > 23 else ''
@@ -296,7 +860,38 @@ class KiriiInventoryPlatform:
                 except (ValueError, IndexError) as e:
                     print(f"⚠️ 行データ処理エラー: {e}")
                     continue
-            
+
+            # Stock に無く InventorySummaryReport にのみ存在する製品を追加（例: SW-002）
+            stock_code_keys = {
+                self._normalize_product_code_key(v.get('code', ''))
+                for v in inventory_data.values()
+            }
+            for code_key, summ in summary_by_code.items():
+                if not code_key or code_key in stock_code_keys:
+                    continue
+                has_qty = (
+                    (summ.get('on_hand') or 0) != 0
+                    or (summ.get('without_dn') or 0) != 0
+                    or (summ.get('quantity') or 0) != 0
+                )
+                if not has_qty and not summ.get('description'):
+                    continue
+                number = next_auto_number
+                next_auto_number += 1
+                inventory_data[number] = {
+                    'code': code_key,
+                    'name': summ.get('description') or code_key,
+                    'location': '0',
+                    'quantity': summ.get('quantity') or 0,
+                    'on_hand': summ.get('on_hand'),
+                    'without_dn': summ.get('without_dn'),
+                    'unit': '支',
+                    'updated': datetime.now().strftime('%Y-%m-%d'),
+                    'category': infer_category_from_code_key(code_key),
+                    'category_detail': summ.get('description') or '',
+                }
+                stock_code_keys.add(code_key)
+
             if inventory_data:
                 print(f"✅ Googleシートから{len(inventory_data)}件のデータを取得")
                 return inventory_data
@@ -307,8 +902,8 @@ class KiriiInventoryPlatform:
         except requests.RequestException as e:
             print(f"❌ Googleシート API リクエストエラー: {e}")
             if hasattr(self, 'api_key') and self.api_key:
-                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500?key={self.api_key}"
-                print(f"📋 API URL: {api_url}")
+                api_url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.sheet_id}/values/Stock!A1:Y1500"
+                print(f"📋 API URL: {api_url}?key=[REDACTED]")
             print(f"📋 レスポンスコード: {getattr(e.response, 'status_code', 'N/A')}")
             print(f"📋 レスポンス内容: {getattr(e.response, 'text', 'N/A')}")
             return self.fallback_inventory
@@ -508,95 +1103,99 @@ def index():
                 filtered[num] = item
         inventory_data = filtered
 
-    # カテゴリ（詳細分類: D列）フィルタ（表記ゆれを吸収して厳密化）
-    import re, unicodedata
-    def _canon_cat(label: str) -> str:
-        if not label:
-            return ''
-        s = unicodedata.normalize('NFKC', str(label)).lower()
-        s = s.replace('—', '-').replace('–', '-').replace('‐', '-')
-        s = re.sub(r'\s+', '', s)
-        
-        # mm Runner/Stud を統一（例: "50mm - S", "50mmS", "50mm Runner" など）
-        m = re.search(r'(\d+)mm[- ]?(runner|stud|[rs])', s)
-        if m:
-            kind = m.group(2).lower()
-            suffix = 'runner' if kind in ('runner', 'r') else 'stud'
-            return f"{m.group(1)}mm-{suffix}"
-        # 2-1/2"-R/S を統一
-        m = re.search(r'2[- ]?1\/2\"?[- ]?(runner|stud|[rs])', s)
-        if m:
-            kind = m.group(1).lower()
-            suffix = 'runner' if kind in ('runner', 'r') else 'stud'
-            return f"2-1/2\"-{suffix}"
-        # HD/SD 系
-        m = re.search(r'^(hd|sd)[- ]?(\d+)$', s)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
-        
-        # 指定されたカテゴリのマッピング
-        category_mapping = {
-            'accessories': 'accessories',
-            'boardfibrecement': 'board-fibrecement',
-            'boardgwb': 'board-gwb',
-            'boardmacau': 'board-macau',
-            'ceilingsystemhd25': 'ceilingsystemhd-25',
-            'ceilingsystemsd19': 'ceilingsystemsd-19',
-            'metalangle': 'metalangle',
-            'screw': 'screw',
-            'teebarmk15': 'teebarmk-15',
-            'teebarmk24': 'teebarmk-24',
-            'teebarnewcolour1': 'teebarnewcolour1',
-            'uchannel': 'uchannel',
-            'venetianastmg90': 'venetianastm-g90',
-            'z-mk': 'z-mk',
-            'accesspanel': 'accesspanel'
-        }
-        
-        # より詳細なマッピング（括弧や特殊文字を含む）
-        detailed_mapping = {
-            'boardgwb(gyproc)': 'board-gwb',
-            'boardfibrecement': 'board-fibrecement',
-            'boardmacau': 'board-macau',
-            'ceilingsystemhd-25': 'ceilingsystemhd-25',
-            'ceilingsystemsd-19': 'ceilingsystemsd-19',
-            'metalangle': 'metalangle',
-            'screw': 'screw',
-            'teebar(mk-15)': 'teebarmk-15',
-            'teebar(mk-24)': 'teebarmk-24',
-            'teebar(newcolour)1': 'teebarnewcolour1',
-            'uchannel': 'uchannel',
-            'venetian(astm-g90)': 'venetianastm-g90',
-            'z-mk': 'z-mk',
-            'accesspanel': 'accesspanel'
-        }
-        
-        # 既知カテゴリのマッピング
-        s2 = re.sub(r'[^a-z0-9]+', '', s)
-        
-        # 詳細マッピングを先にチェック
-        for key, value in detailed_mapping.items():
-            if key in s2:
-                return value
-        for key, value in category_mapping.items():
-            if key in s2:
-                return value
-        
-        return s2
-
+    import re
     # BDシリーズとFCシリーズの製品コードリスト
     bd_series_codes = [
-        'BD-011', 'BD-024', 'BD-030', 'BD-043', 'BD-045-MN', 'BD-048-MN', 'BD-049', 
-        'BD-050-MN', 'BD-051', 'BD-052', 'BD-053', 'BD-054', 'BD-055-M', 'BD-056-M', 
+        'BD-011', 'BD-024', 'BD-030', 'BD-043', 'BD-045-MN', 'BD-048-MN', 'BD-049',
+        'BD-050-MN', 'BD-051', 'BD-052', 'BD-053', 'BD-054', 'BD-055-M', 'BD-056-M',
         'BD-057', 'BD-059', 'BD-060', 'BD-061', 'BD-062', 'BD-063', 'BD-064', 'BD-065', 'BD-067',
-        'FC-003', 'FC-006', 'FC-007', 'FC-008', 'FC-014', 'FC-015', 'FC-036', 'FC-041', 
-        'FC-043', 'FC-044', 'FC-046', 'FC-049', 'FC-052', 'FC-053', 'FC-055', 'FC-056', 'FC-057', 'FC-059'
+        'FC-003', 'FC-006', 'FC-007', 'FC-008', 'FC-014', 'FC-015', 'FC-036', 'FC-041',
+        'FC-043', 'FC-044', 'FC-046', 'FC-049', 'FC-052', 'FC-053', 'FC-055', 'FC-056', 'FC-057', 'FC-059',
     ]
-    
+
+    # Board- Fibre Cement 対象の製品コード
+    fibre_cement_codes = [
+        'FC-003', 'FC-006', 'FC-014', 'FC-015', 'FC-036', 'FC-043', 'FC-044',
+        'FC-046', 'FC-052', 'FC-055',
+    ]
+
+    # TaishanBoard対象の製品コード
+    taishan_board_codes = [
+        'BD-060', 'BD-061', 'BD-062', 'BD-063', 'BD-064', 'BD-065', 'BD-067',
+        'FC-056', 'FC-059', 'FC-066',
+    ]
+
     # ACシリーズの製品コードリスト
     ac_series_codes = [
+        'AC-204', 'AC-212', 'AC-215',
         'AC-260', 'AC-261', 'AC-262', 'AC-269', 'AC-270'
     ]
+
+    teebarmk15_codes = [
+        'TNMA1532M3000MK', 'TNMC1525M0600MK', 'TNMC1525M1200MK',
+    ]
+
+    teebarmk24_codes = [
+        'TNIA2432I0800MK', 'TNIA2432I1000MK', 'TNIC2425I0200MK', 'TNIC2425I0400MK',
+        'TNIL2025I0800MK', 'TNIL2025I1000MK', 'TNMA2432M2400MK', 'TNMA2432M3000H200MK',
+        'TNMA2432M3000H500MK', 'TNMA2432M3000MK', 'TNMC2425M0500MK', 'TNMC2425M0600MK',
+        'TNMC2425M1000MK', 'TNMC2425M1200MK',
+    ]
+
+    teebarnewcolour1_codes = [
+        'TNIW2020I1000N1',
+    ]
+
+    screw_codes = [
+        'SW-002', 'SW-003', 'SW-003B', 'SW-005', 'SW-008', 'SW-009', 'SW-009B', 'SW-010',
+        'SW-011', 'SW-012', 'SW-018', 'SW-020', 'SW-028', 'SW-030', 'SW-031', 'SW-032',
+        'SW-033', 'SW-039C', 'SW-039S', 'SW-040B', 'SW-041', 'SW-044', 'SW-048', 'SW-049',
+        'SW-050', 'SW-063', 'SW-065', 'SW-068',
+    ]
+
+    def normalize_code(code: str) -> str:
+        if not code:
+            return ''
+        import re
+        s = str(code).strip().upper()
+        s = re.sub(r'[－ー−–—]', '-', s)
+        m = re.search(r'\b(AC|BD|FC)\s*[- ]?\s*(\d+)(?:\s*[- ]?\s*([A-Z0-9]+))?\b', s)
+        if m:
+            prefix, number, suffix = m.group(1), m.group(2), m.group(3)
+            return f"{prefix}-{number}" + (f"-{suffix}" if suffix else '')
+        return re.sub(r'\s+', '', s)
+
+    def normalize_filter_code(code: str) -> str:
+        if not code:
+            return ''
+        import re
+        s = str(code).strip().upper()
+        s = re.sub(r'[－ー−–—]', '-', s)
+        return re.sub(r'\s+', '', s)
+
+    bd_series_codes_set = {normalize_code(c) for c in bd_series_codes}
+    fibre_cement_codes_set = {normalize_filter_code(c) for c in fibre_cement_codes}
+    ac_series_codes_set = {normalize_code(c) for c in ac_series_codes}
+    taishan_board_codes_set = {normalize_code(c) for c in taishan_board_codes}
+    teebarmk15_codes_set = {normalize_filter_code(c) for c in teebarmk15_codes}
+    teebarmk24_codes_set = {normalize_filter_code(c) for c in teebarmk24_codes}
+    teebarnewcolour1_codes_set = {normalize_filter_code(c) for c in teebarnewcolour1_codes}
+    screw_codes_set = {normalize_filter_code(c) for c in screw_codes}
+
+    CODE_BASED_FILTERS = {
+        'AllBoard': lambda item: normalize_code(item.get('code', '')) in bd_series_codes_set,
+        'TaishanBoard': lambda item: normalize_code(item.get('code', '')) in taishan_board_codes_set,
+        'Board- Fibre Cement': lambda item: normalize_filter_code(item.get('code', '')) in fibre_cement_codes_set,
+        'Allwool': lambda item: normalize_code(item.get('code', '')) in ac_series_codes_set,
+        'Tee-Bar (MK -15)': lambda item: normalize_filter_code(item.get('code', '')) in teebarmk15_codes_set,
+        'Tee-Bar (MK -24)': lambda item: (
+            normalize_filter_code(item.get('code', '')) in teebarmk24_codes_set
+            or item.get('category', '') == 'Tee-Bar (MK -24)'
+        ),
+        'Tee-Bar(New Colour)1': lambda item: normalize_filter_code(item.get('code', '')) in teebarnewcolour1_codes_set,
+        'SCREW': lambda item: normalize_filter_code(item.get('code', '')) in screw_codes_set,
+    }
+    CHIP_SPECIAL_CATEGORIES = list(CODE_BASED_FILTERS.keys())
 
     # cat変数をデコードして統一
     from urllib.parse import unquote
@@ -604,17 +1203,11 @@ def index():
     print(f"🔍 DEBUG: cat='{cat}', cat_decoded='{cat_decoded}'")  # デバッグ用
     
     if cat_decoded:
-        # AllBoardフィルターの特別処理
-        if cat_decoded == 'AllBoard':
+        if cat_decoded in CODE_BASED_FILTERS:
+            match_fn = CODE_BASED_FILTERS[cat_decoded]
             inventory_data = {
                 num: item for num, item in inventory_data.items()
-                if item.get('code', '') in bd_series_codes
-            }
-        # Allwoolフィルターの特別処理
-        elif cat_decoded == 'Allwool':
-            inventory_data = {
-                num: item for num, item in inventory_data.items()
-                if item.get('code', '') in ac_series_codes
+                if match_fn(item)
             }
         else:
             # E列のカテゴリと直接比較
@@ -684,30 +1277,17 @@ def index():
     canon_counts = Counter(valid_categories)
     print(f"🔍 カテゴリ集計: {dict(canon_counts)}")  # デバッグ用
     
-    # AllBoardカテゴリの件数を計算
+    # コードベース特殊カテゴリの件数を計算
     all_inventory = platform.get_inventory_data()
-    bd_count = sum(1 for item in all_inventory.values() if item.get('code', '') in bd_series_codes)
-    if bd_count > 0:
-        canon_counts['AllBoard'] = bd_count
-    
-    # Allwoolカテゴリの件数を計算
-    ac_count = sum(1 for item in all_inventory.values() if item.get('code', '') in ac_series_codes)
-    if ac_count > 0:
-        canon_counts['Allwool'] = ac_count
+    for cat_name, match_fn in CODE_BASED_FILTERS.items():
+        count = sum(1 for item in all_inventory.values() if match_fn(item))
+        if count > 0:
+            canon_counts[cat_name] = count
     
     # E列の値をそのまま使用するため、変換マッピングは不要
 
-    # E列の実際の値に基づく順序（ユーザー指定の順序）
-    predefined_order = [
-        'AllBoard', 'Allwool', '50mm Runner', '50mm Stud', '2-1/2" Runner', '51mm Runner',
-        '51mm Stud', '64mm Runner', '64mm Stud', '75mm Runner', '75mm Stud', '76mm Runner',
-        '76mm Stud', '86mm Runner', '86mm Stud', '92mm Runner', '92mm Stud',
-        '100mm Runner', '100mm Stud', '102mm Runner', '102mm Stud', '125mm Runner', '125mm Stud',
-        '127mm Runner', '127mm Stud', '150mm Runner', '150mm Stud', '152mm Runner', '152mm Stud',
-        'Accessories', 'Board- Fibre Cement', 'Board- GWB (GypRoc)', 'Board- Macau',
-        'Ceiling System HD-25', 'Ceiling System SD-19', 'Metal Angle', 'SCREW', 'Tee-Bar (MK -15)',
-        'Tee-Bar (MK -24)', 'Tee-Bar(New Colour)1', 'U-Channel', 'Venetian (ASTM-G90)', 'Z-MK', 'Access Panel'
-    ]
+    # E列の実際の値に基づく順序（CATEGORY_PREDEFINED_ORDER = 鉄ルール固定）
+    predefined_order = CATEGORY_PREDEFINED_ORDER
     
     # 既存のカテゴリを指定順に並べる
     ordered_categories = []
@@ -726,6 +1306,8 @@ def index():
     ordered_cnt = [(c, canon_counts[c]) for c in ordered_categories]
     
     print(f"🔍 表示用カテゴリ（最初の10個）: {top_categories_canon}")  # デバッグ用
+
+    platform.attach_adjust_to_inventory(inventory_data)
 
     return render_template_string('''
 <!DOCTYPE html>
@@ -907,6 +1489,33 @@ def index():
         .download-btn:hover {
             background: #218838;
         }
+
+        .action-bar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 8px;
+        }
+
+        .action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 8px 14px;
+            border-radius: 8px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            color: #333;
+            text-decoration: none;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .action-btn:hover {
+            background: #e9ecef;
+        }
+
         /* フィルタチップ */
         .chip-bar { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px; margin: 8px 0 14px; }
         .chip { white-space: nowrap; padding: 6px 10px; border: 1px solid #dee2e6; border-radius: 999px; font-size: 12px; color:#333; background:#fff; }
@@ -952,6 +1561,10 @@ def index():
         .product-details {
             color: #6c757d;
             font-size: 0.95em;
+        }
+
+        .adjust-inline {
+            color: #ff8c00;
         }
         
         .footer {
@@ -1006,7 +1619,7 @@ def index():
         <div class="inventory-list">
             <div class="list-title">
                 <div class="list-title-text">📦 Inventory List / 庫存清單</div>
-                <button class="download-btn" onclick="downloadStockList()">📥 Download List/下載名單</button>
+                <a class="download-btn" href="/download-list">📥 Download List / 下載名單</a>
             </div>
 
             <!-- Category chips -->
@@ -1016,12 +1629,30 @@ def index():
                 {% if 'AllBoard' in canon_counts %}
                 <a class="chip {{ 'active' if cat_decoded=='AllBoard' else '' }}" href="/?cat=AllBoard">AllBoard<span class="chip-count">{{ canon_counts.get('AllBoard', 0) }}</span></a>
                 {% endif %}
+                {% if 'TaishanBoard' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='TaishanBoard' else '' }}" href="/?cat=TaishanBoard">TaishanBoard<span class="chip-count">{{ canon_counts.get('TaishanBoard', 0) }}</span></a>
+                {% endif %}
+                {% if 'Board- Fibre Cement' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Board- Fibre Cement' else '' }}" href="/?cat={{ 'Board- Fibre Cement' | urlencode }}">Board- Fibre Cement<span class="chip-count">{{ canon_counts.get('Board- Fibre Cement', 0) }}</span></a>
+                {% endif %}
                 {% if 'Allwool' in canon_counts %}
                 <a class="chip {{ 'active' if cat_decoded=='Allwool' else '' }}" href="/?cat=Allwool">Allwool<span class="chip-count">{{ canon_counts.get('Allwool', 0) }}</span></a>
                 {% endif %}
+                {% if 'Tee-Bar (MK -15)' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Tee-Bar (MK -15)' else '' }}" href="/?cat={{ 'Tee-Bar (MK -15)' | urlencode }}">Tee-Bar (MK -15)<span class="chip-count">{{ canon_counts.get('Tee-Bar (MK -15)', 0) }}</span></a>
+                {% endif %}
+                {% if 'Tee-Bar (MK -24)' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Tee-Bar (MK -24)' else '' }}" href="/?cat={{ 'Tee-Bar (MK -24)' | urlencode }}">Tee-Bar (MK -24)<span class="chip-count">{{ canon_counts.get('Tee-Bar (MK -24)', 0) }}</span></a>
+                {% endif %}
+                {% if 'Tee-Bar(New Colour)1' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='Tee-Bar(New Colour)1' else '' }}" href="/?cat={{ 'Tee-Bar(New Colour)1' | urlencode }}">Tee-Bar(New Colour)1<span class="chip-count">{{ canon_counts.get('Tee-Bar(New Colour)1', 0) }}</span></a>
+                {% endif %}
+                {% if 'SCREW' in canon_counts %}
+                <a class="chip {{ 'active' if cat_decoded=='SCREW' else '' }}" href="/?cat=SCREW">SCREW<span class="chip-count">{{ canon_counts.get('SCREW', 0) }}</span></a>
+                {% endif %}
                 <button class="more-btn" onclick="openSheet()">More</button>
                 {% for c in top_categories %}
-                {% if c != 'AllBoard' and c != 'Allwool' %}
+                {% if c not in chip_special_categories %}
                 <a class="chip {{ 'active' if cat_decoded==c else '' }}" href="/?cat={{ c | urlencode }}">{{ c }}<span class="chip-count">{{ canon_counts.get(c, 0) }}</span></a>
                 {% endif %}
                 {% endfor %}
@@ -1047,6 +1678,7 @@ def index():
                     {% if product.on_hand is not none %}📦 OH {{ product.on_hand }}{{ product.unit }} |{% endif %}
                     {% if product.without_dn is not none %} 📃 w/o {{ product.without_dn }}{{ product.unit }} |{% endif %}
                     Avail 📊 {{ product.quantity }}{{ product.unit }}
+                    {% if product.adjust %} | <span class="adjust-inline">Adjust {{ product.adjust }}{{ product.unit }}</span>{% endif %}
                     | 🏷️ {{ 'MK' if 'merchandises' in ((product.category or '')|lower) else product.category }}
                 </div>
             </div>
@@ -1297,7 +1929,8 @@ def index():
     cat_decoded=cat_decoded,
     top_categories=top_categories_canon,
     canon_counts=canon_counts,
-    ordered_cnt=ordered_cnt
+    ordered_cnt=ordered_cnt,
+    chip_special_categories=CHIP_SPECIAL_CATEGORIES
     )
 
 @app.route('/product/<int:product_number>')
@@ -1306,6 +1939,7 @@ def product_detail(product_number):
     try:
         # Googleシートから最新の在庫データを取得
         inventory_data = platform.get_inventory_data()
+        platform.attach_adjust_to_inventory(inventory_data)
         
         if product_number not in inventory_data:
             return render_template_string('''
@@ -1434,6 +2068,20 @@ def product_detail(product_number):
         .detail-item.last-updated-item {
             grid-column: 1 / -1; /* 3行目は全幅 */
         }
+
+        .detail-item.latest-production-item {
+            grid-column: 1 / -1; /* Last Updated の下に全幅 */
+        }
+
+        .detail-value.latest-production-value {
+            font-size: 1.05em;
+            word-break: break-word;
+        }
+
+        .detail-value.latest-production-muted {
+            color: #6c757d;
+            font-weight: normal;
+        }
         
         .detail-label {
             font-size: 0.9em;
@@ -1450,6 +2098,13 @@ def product_detail(product_number):
         .quantity {
             font-size: 2em;
             color: #28a745;
+            white-space: nowrap;
+        }
+
+        .adjust-suffix {
+            color: #ff8c00;
+            font-size: calc(1em - 1pt);
+            font-weight: bold;
         }
         
         .location-value {
@@ -1585,7 +2240,7 @@ def product_detail(product_number):
             <div class="details-grid">
                 <div class="detail-item">
                     <div class="detail-label">📊Available Stock / 可出數量</div>
-                    <div class="detail-value quantity">{{ product.quantity }}{{ product.unit }}</div>
+                    <div class="detail-value quantity">{{ product.quantity }}{{ product.unit }}{% if product.adjust %}<span class="adjust-suffix">({{ product.adjust }}{{ product.unit }})</span>{% endif %}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">📍 Storage Location / 儲存位置</div>
@@ -1637,6 +2292,10 @@ def product_detail(product_number):
                     <div class="detail-label">📅 Last Updated / 最後更新</div>
                     <div class="detail-value">{{ product.updated }}</div>
                 </div>
+                <div class="detail-item latest-production-item">
+                    <div class="detail-label">🏭 Latest Production / 最新生產時間</div>
+                    <div class="detail-value latest-production-value latest-production-muted" id="latest-production-value">讀取中…</div>
+                </div>
             </div>
             
             <button class="scan-again" onclick="window.location.href='/'">📱 Scan Other Products / 掃描其他產品</button>
@@ -1659,6 +2318,31 @@ def product_detail(product_number):
                     cell.classList.add('highlighted');
                 }
             });
+
+            const latestEl = document.getElementById('latest-production-value');
+            const productCode = {{ product.code|tojson }};
+            if (latestEl && productCode) {
+                const apiUrl = 'https://pq-form.vercel.app/api/pq_form/production_records/latest?productNo='
+                    + encodeURIComponent(productCode);
+                fetch(apiUrl, { cache: 'no-store' })
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        if (data && data.success && data.found && data.display) {
+                            latestEl.textContent = data.display;
+                            latestEl.classList.remove('latest-production-muted');
+                        } else {
+                            latestEl.textContent = '暫無生產紀錄';
+                            latestEl.classList.add('latest-production-muted');
+                        }
+                    })
+                    .catch(function() {
+                        latestEl.textContent = '暫無生產紀錄';
+                        latestEl.classList.add('latest-production-muted');
+                    });
+            } else if (latestEl) {
+                latestEl.textContent = '暫無生產紀錄';
+                latestEl.classList.add('latest-production-muted');
+            }
         });
         
         // 製品詳細ページ用の関数
@@ -1686,6 +2370,466 @@ def api_inventory():
     """在庫データAPI"""
     inventory_data = platform.get_inventory_data()
     return jsonify(inventory_data)
+
+@app.route('/api/summary-peek')
+def api_summary_peek():
+    """InventorySummaryReport の指定コード確認（診断用）"""
+    codes = request.args.get('codes', 'TNIA2432I0800MK,BD-060').split(',')
+    platform._inventory_cache = None
+    summary = platform._fetch_inventory_summary_by_code()
+    out = {}
+    for raw in codes:
+        raw = raw.strip()
+        if not raw:
+            continue
+        key = platform._normalize_product_code_key(raw)
+        out[raw] = {
+            'normalized': key,
+            'exact': summary.get(key),
+            'lookup': platform._lookup_summary_row(summary, raw),
+        }
+    return jsonify({'summary_count': len(summary), 'codes': out})
+
+
+@app.route('/take-stock')
+def take_stock_page():
+    """盤點ページ - PDF形式の表 + Adjust入力 + 版履歴"""
+    version_id = (request.args.get('version') or '').strip()
+    clear_adjust = (request.args.get('clear_adjust') or '').strip() in ('1', 'true', 'yes')
+    read_only = bool(version_id)
+    if version_id:
+        snapshot = platform.get_stocktake_history_version(version_id)
+        if snapshot.get('error') and not snapshot.get('rows'):
+            snapshot = {'meta': {}, 'rows': [], 'error': snapshot.get('error')}
+        clear_adjust = False
+    else:
+        snapshot = platform.get_stocktake_snapshot()
+    meta = snapshot.get('meta', {})
+    rows = snapshot.get('rows', [])
+    if clear_adjust:
+        for row in rows:
+            if row.get('row_type') == 'product':
+                row['adjust'] = ''
+    versions = platform.list_stocktake_history_versions()
+    snapshot_key = f"{meta.get('report_date', '')}_{meta.get('report_time', '')}_{meta.get('source_email_at', '') or meta.get('saved_at', '')}"
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TakeStock / 盤點表</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html {
+            -webkit-text-size-adjust: 100%;
+            text-size-adjust: 100%;
+        }
+        body { font-family: "Times New Roman", Times, serif; background: #fff; color: #000; padding: 16px; }
+        .container { max-width: 980px; margin: 0 auto; }
+        .header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .logo {
+            height: 27px;
+            width: auto;
+            margin-right: 15px;
+        }
+        .header-title {
+            font-size: clamp(1em, 4vw, 1.4em);
+            font-weight: bold;
+            color: #333;
+        }
+        .report-header { text-align: left; margin-bottom: 12px; line-height: 1.35; }
+        .report-header h2 { font-size: clamp(13px, 3.5vw, 16px); font-weight: bold; margin-bottom: 8px; }
+        .report-meta { font-size: clamp(11px, 3vw, 13px); }
+        .toolbar {
+            display: flex; flex-wrap: nowrap; gap: 6px; margin: 12px 0;
+            font-family: Arial, sans-serif; width: 100%;
+        }
+        .btn {
+            flex: 1 1 0; min-width: 0; padding: 8px 4px; border: 1px solid #333;
+            background: #fff; cursor: pointer; border-radius: 4px;
+            font-size: clamp(10px, 2.6vw, 14px); white-space: nowrap; text-align: center;
+        }
+        .btn-primary { background: #28a745; color: #fff; border-color: #28a745; }
+        .btn-secondary { background: #007bff; color: #fff; border-color: #007bff; }
+        .btn-print { background: #6c757d; color: #fff; border-color: #6c757d; }
+        .btn-refresh { background: #fd7e14; color: #fff; border-color: #fd7e14; }
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .history-section { margin-top: 20px; font-family: Arial, sans-serif; }
+        .history-section h3 { font-size: clamp(13px, 3.5vw, 15px); margin-bottom: 8px; }
+        .history-list { border: 1px solid #ccc; }
+        .history-row {
+            display: block; padding: 10px 12px; border-bottom: 1px solid #e5e5e5;
+            text-decoration: none; color: #000; background: #fff; cursor: pointer;
+        }
+        .history-row:last-child { border-bottom: none; }
+        .history-row:hover { background: #f0f7ff; }
+        .history-row.active { background: #fff3e0; font-weight: bold; }
+        .history-row .saved-at { color: #666; font-size: 12px; margin-left: 8px; font-weight: normal; }
+        .version-banner {
+            font-family: Arial, sans-serif; background: #fff3e0; border: 1px solid #fd7e14;
+            padding: 8px 12px; margin-bottom: 10px; font-size: clamp(12px, 3.2vw, 14px);
+        }
+        .adjust-input:disabled { background: #f5f5f5; border-color: #999; color: #333; }
+        .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid #ccc; }
+        table { width: 100%; border-collapse: collapse; font-size: clamp(8px, 2.4vw, 12px); table-layout: fixed; }
+        th, td { border: 1px solid #ccc; padding: 4px 6px; vertical-align: top; word-wrap: break-word; overflow-wrap: break-word; }
+        th { background: #f5f5f5; font-weight: bold; text-align: center; }
+        td.num { text-align: right; white-space: nowrap; padding-left: 2px; padding-right: 4px; }
+        tr.category-row td { font-weight: bold; text-decoration: underline; border-bottom: 1px solid #999; background: #fafafa; }
+        tr.subcategory-row td { font-weight: bold; text-decoration: underline; padding-left: 18px; background: #fcfcfc; }
+        tr.product-row td.code { white-space: normal; word-break: break-all; }
+        tr.product-row td:nth-child(2) { white-space: normal; word-break: break-word; }
+        .adjust-input {
+            width: 100%;
+            max-width: none;
+            padding: 2px 2px;
+            font-size: inherit;
+            text-align: right;
+            border: 1px solid #28a745;
+            background: #fff;
+            border-radius: 2px;
+        }
+        .empty-state { padding: 40px 16px; text-align: center; font-family: Arial, sans-serif; color: #666; font-size: clamp(12px, 3.2vw, 14px); }
+        .status { font-family: Arial, sans-serif; font-size: clamp(11px, 3vw, 13px); margin-top: 8px; min-height: 18px; }
+        .qty-head { text-align: center; }
+        /* Qty: ~4 digits; Adjust: wide enough for header "Adjust" on one line */
+        table col.col-code { width: 28%; }
+        table col.col-desc { width: auto; }
+        table col.col-qty { width: 3.6em; }
+        table col.col-adj { width: 4.8em; }
+        thead th { line-height: 1.15; }
+        thead th:not(:last-child) { overflow-wrap: anywhere; word-break: break-word; }
+        thead th:last-child { white-space: nowrap; overflow-wrap: normal; word-break: keep-all; }
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .header { margin-bottom: 14px; padding-bottom: 10px; }
+            .logo { height: 22px; margin-right: 10px; }
+            th, td { padding: 3px 3px; }
+            tr.subcategory-row td { padding-left: 10px; }
+            table col.col-qty { width: 3.2em; }
+            table col.col-adj { width: 4.6em; }
+            .adjust-input { border: 1.5px solid #28a745; }
+        }
+        @media (max-width: 480px) {
+            body { padding: 8px; }
+            th, td { padding: 2px 2px; }
+            table col.col-qty { width: 3em; }
+            table col.col-adj { width: 4.4em; }
+            .adjust-input { border: 1.5px solid #28a745; }
+        }
+        @page {
+            size: A4 portrait;
+            margin: 12mm 15mm;
+        }
+        @media print {
+            .toolbar, #status, .history-section, .version-banner { display: none !important; }
+            html, body {
+                width: auto;
+                height: auto;
+                margin: 0;
+                padding: 0;
+            }
+            body { padding: 0; }
+            .container {
+                max-width: none;
+                width: 100%;
+                margin: 0;
+                padding: 0;
+            }
+            .header { margin-bottom: 8px; padding-bottom: 8px; }
+            .report-header { margin-bottom: 8px; }
+            .table-wrap { overflow: visible; border: 1px solid #ccc; }
+            table { width: 100%; font-size: 8pt; }
+            th, td { padding: 2px 4px; }
+            .adjust-input { border: 1px solid #28a745; background: #fff; padding: 1px 2px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <img src="/static/logo.png" class="logo" alt="KIRII Logo">
+            <div class="header-title">TakeStock  盤點表</div>
+        </div>
+        {% if not rows %}
+        <div class="empty-state">
+            <p>盤點データがありません / No stocktake snapshot yet.</p>
+            <p style="margin-top:8px;">最新の inventory.pdf メール処理後に表示されます。</p>
+        </div>
+        {% else %}
+        <div class="report-header">
+            <h2>{{ meta.title or 'Inventory Summary Report' }}</h2>
+            <div class="report-meta">
+                {% if meta.report_date %}Date : {{ meta.report_date }}<br>{% endif %}
+                {% if meta.report_time %}Time : {{ meta.report_time }}<br>{% endif %}
+            </div>
+        </div>
+        {% if read_only %}
+        <div class="version-banner">
+            Viewing saved version / 過去版表示中
+            {% if meta.saved_at %}（saved {{ meta.saved_at }}）{% endif %}
+            — use Refresh / 現時版 for latest
+        </div>
+        {% endif %}
+        <div class="toolbar">
+            <button class="btn btn-primary" onclick="saveAdjustments()" {% if read_only %}disabled{% endif %}>Save / 保存</button>
+            <button class="btn btn-secondary" onclick="exportCsv()">Export / 匯出</button>
+            <button class="btn btn-print" type="button" onclick="printStocktake()">Print / 印刷</button>
+            <button class="btn btn-refresh" type="button" onclick="refreshCurrent()">Refresh / 現時版</button>
+        </div>
+        <div id="status" class="status"></div>
+        <div class="table-wrap">
+            <table>
+                <colgroup>
+                    <col class="col-code">
+                    <col class="col-desc">
+                    <col class="col-qty">
+                    <col class="col-qty">
+                    <col class="col-qty">
+                    <col class="col-adj">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th rowspan="2">Product Code</th>
+                        <th rowspan="2">Description</th>
+                        <th colspan="3" class="qty-head">Quantity</th>
+                        <th rowspan="2">Adjust</th>
+                    </tr>
+                    <tr>
+                        <th>On Hand</th>
+                        <th>SC w/o DN</th>
+                        <th title="Available">Avail</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                    {% if row.row_type == 'category' %}
+                    <tr class="category-row"><td colspan="6">{{ row.category }}</td></tr>
+                    {% elif row.row_type == 'subcategory' %}
+                    <tr class="subcategory-row"><td colspan="6">{{ row.sub_category }}</td></tr>
+                    {% elif row.row_type == 'product' %}
+                    <tr class="product-row" data-code="{{ row.product_code }}">
+                        <td class="code">{{ row.product_code }}</td>
+                        <td>{{ row.description }}</td>
+                        <td class="num">{{ row.on_hand }}</td>
+                        <td class="num">{{ row.sc_wo_dn }}</td>
+                        <td class="num">{{ row.available }}</td>
+                        <td class="num">
+                            <input type="text" class="adjust-input" data-code="{{ row.product_code }}"
+                                   value="{{ row.adjust or '' }}" inputmode="decimal"
+                                   {% if read_only %}disabled{% endif %}>
+                        </td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+        <div class="history-section">
+            <h3>History / 履歴</h3>
+            {% if versions %}
+            <div class="history-list">
+                {% for v in versions %}
+                <a class="history-row{% if version_id == v.version_id %} active{% endif %}"
+                   href="/take-stock?version={{ v.version_id }}">
+                    {{ v.label }}
+                    {% if v.saved_at %}<span class="saved-at">· saved {{ v.saved_at }}</span>{% endif %}
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p style="color:#666;font-size:13px;">No saved versions yet. Press Save / 保存 to create one.</p>
+            {% endif %}
+        </div>
+    </div>
+    <script>
+        const SNAPSHOT_KEY = {{ snapshot_key | tojson }};
+        const READ_ONLY = {{ read_only | tojson }};
+        const VERSION_ID = {{ version_id | tojson }};
+        const CLEAR_ADJUST = {{ clear_adjust | tojson }};
+        const STORAGE_PREFIX = 'stocktake_adjust_';
+        function clearLocalAdjustStorage() {
+            try {
+                const keys = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (k && k.indexOf(STORAGE_PREFIX) === 0) keys.push(k);
+                }
+                keys.forEach(function (k) { localStorage.removeItem(k); });
+            } catch (e) {}
+        }
+        function getAdjustmentsFromInputs() {
+            const out = {};
+            document.querySelectorAll('.adjust-input').forEach(el => {
+                const code = el.dataset.code;
+                if (code) out[code] = el.value.trim();
+            });
+            return out;
+        }
+        function restoreLocalAdjustments() {
+            if (READ_ONLY || CLEAR_ADJUST) return;
+            try {
+                const saved = localStorage.getItem(STORAGE_PREFIX + SNAPSHOT_KEY);
+                if (!saved) return;
+                const data = JSON.parse(saved);
+                document.querySelectorAll('.adjust-input').forEach(el => {
+                    const code = el.dataset.code;
+                    if (code && data[code] !== undefined && !el.value) el.value = data[code];
+                });
+            } catch (e) {}
+        }
+        function persistLocalAdjustments() {
+            if (READ_ONLY) return;
+            try {
+                localStorage.setItem(STORAGE_PREFIX + SNAPSHOT_KEY, JSON.stringify(getAdjustmentsFromInputs()));
+            } catch (e) {}
+        }
+        document.querySelectorAll('.adjust-input').forEach(el => {
+            el.addEventListener('input', persistLocalAdjustments);
+        });
+        if (CLEAR_ADJUST) {
+            clearLocalAdjustStorage();
+            document.querySelectorAll('.adjust-input').forEach(el => { el.value = ''; });
+        } else {
+            restoreLocalAdjustments();
+        }
+        async function saveAdjustments() {
+            if (READ_ONLY) return;
+            const status = document.getElementById('status');
+            status.textContent = 'Saving...';
+            const adjustments = getAdjustmentsFromInputs();
+            persistLocalAdjustments();
+            try {
+                const res = await fetch('/api/stocktake/adjust', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ adjustments })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    status.textContent = 'Saved / 已保存 (' + (data.message || '') + ')';
+                    status.style.color = '#28a745';
+                    // reload to show new history row (keep saved Adjust on sheet)
+                    setTimeout(function () { window.location.href = '/take-stock'; }, 600);
+                } else {
+                    status.textContent = 'Save failed: ' + (data.error || data.message || res.status);
+                    status.style.color = '#dc3545';
+                }
+            } catch (e) {
+                status.textContent = 'Save failed: ' + e.message;
+                status.style.color = '#dc3545';
+            }
+        }
+        function exportCsv() {
+            if (VERSION_ID) {
+                window.location.href = '/take-stock/export.csv?version=' + encodeURIComponent(VERSION_ID);
+            } else {
+                window.location.href = '/take-stock/export.csv';
+            }
+        }
+        function printStocktake() { window.print(); }
+        function refreshCurrent() {
+            clearLocalAdjustStorage();
+            window.location.href = '/take-stock?clear_adjust=1';
+        }
+    </script>
+</body>
+</html>
+    ''', meta=meta, rows=rows, snapshot_key=snapshot_key, versions=versions,
+       read_only=read_only, version_id=version_id, clear_adjust=clear_adjust)
+
+
+@app.route('/api/stocktake')
+def api_stocktake():
+    return jsonify(platform.get_stocktake_snapshot())
+
+
+@app.route('/api/stocktake/versions')
+def api_stocktake_versions():
+    return jsonify({'versions': platform.list_stocktake_history_versions()})
+
+
+@app.route('/api/stocktake/versions/<version_id>')
+def api_stocktake_version_detail(version_id):
+    snapshot = platform.get_stocktake_history_version(version_id)
+    if snapshot.get('error') and not snapshot.get('rows'):
+        return jsonify(snapshot), 404
+    return jsonify(snapshot)
+
+
+@app.route('/api/stocktake/adjust', methods=['POST'])
+def api_stocktake_adjust():
+    payload = request.get_json(silent=True) or {}
+    adjustments = payload.get('adjustments') or {}
+    if not isinstance(adjustments, dict):
+        return jsonify({'success': False, 'error': 'invalid adjustments'}), 400
+    ok, message, version_id = platform.save_stocktake_adjustments(adjustments)
+    if ok:
+        return jsonify({'success': True, 'message': message, 'version_id': version_id})
+    return jsonify({'success': False, 'error': message}), 503
+
+
+@app.route('/take-stock/export.csv')
+def take_stock_export_csv():
+    version_id = (request.args.get('version') or '').strip()
+    if version_id:
+        snapshot = platform.get_stocktake_history_version(version_id)
+    else:
+        snapshot = platform.get_stocktake_snapshot()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Product Code', 'Description', 'On Hand', 'SC w/o DN', 'Available', 'Adjust'])
+    for row in snapshot.get('rows', []):
+        if row.get('row_type') == 'category':
+            writer.writerow([row.get('category', ''), '', '', '', '', ''])
+        elif row.get('row_type') == 'subcategory':
+            writer.writerow(['', row.get('sub_category', ''), '', '', '', ''])
+        elif row.get('row_type') == 'product':
+            writer.writerow([
+                row.get('product_code', ''), row.get('description', ''),
+                row.get('on_hand', ''), row.get('sc_wo_dn', ''),
+                row.get('available', ''), row.get('adjust', ''),
+            ])
+    date_part = snapshot.get('meta', {}).get('report_date', 'export').replace('/', '-')
+    if version_id:
+        filename = f"stocktake_{date_part}_{version_id}.csv"
+    else:
+        filename = f"stocktake_{date_part}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+
+@app.route('/download-list')
+def download_list():
+    rows = platform.build_download_list_rows()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    default_headers = ['Product Code', 'Description', 'On Hand', 'Quantity SC w/o DN', 'Available', 'Adjust', 'Time']
+    if rows:
+        headers = list(rows[0].keys())
+        writer.writerow(headers)
+        for row in rows:
+            writer.writerow([row.get(h, '') for h in headers])
+    else:
+        writer.writerow(default_headers)
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="inventory_list.csv"'}
+    )
+
 
 @app.route('/api/product/<int:product_number>')
 def api_product(product_number):
@@ -1780,19 +2924,6 @@ def product_detail_by_code(product_code):
     except Exception as e:
         print(f"ロゴ読み込みエラー: {e}")
         return "KIRII", 200, {'Content-Type': 'text/plain'}
-
-
-@app.route('/favicon.ico')
-def favicon():
-    """ファビコンを提供（ロゴ画像をfaviconとして返す）"""
-    # ロゴと同じBase64データを使用（上記のlogo_base64変数を再利用）
-    try:
-        import base64
-        logo_data = base64.b64decode(logo_base64)
-        return logo_data, 200, {'Content-Type': 'image/png'}
-    except Exception as e:
-        print(f"ファビコン読み込みエラー: {e}")
-        return '', 204, {'Content-Type': 'image/x-icon'}
 
 if __name__ == '__main__':
     print("🏭 KIRII在庫管理Vercelプラットフォーム起動")
